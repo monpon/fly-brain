@@ -6,9 +6,9 @@ dopaminergic neurons), a second is presented alone. Dopamine depresses the
 KC->MBON synapses carrying the punished odour, and the fly's valence for it
 drops.
 
-    .venv/bin/python scripts/train_fly.py
-    .venv/bin/python scripts/train_fly.py --epochs 40 --seed 3
-    .venv/bin/python scripts/train_fly.py --reward     # appetitive instead
+    flybrain train-fly
+    flybrain train-fly --epochs 40 --seed 3
+    flybrain train-fly --reward     # appetitive instead
 
 Writes a portable checkpoint to output/trained_fly.flyckpt.
 """
@@ -17,7 +17,6 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from flybrain import checkpoint, mushroom_body as MB
 from flybrain.learning import FlyBrain, LearningParams
@@ -99,7 +98,7 @@ def main() -> None:
         notes=f"{args.epochs} epochs, LI {li:+.4f}",
     )
     print(f"\nsaved -> {path}  ({path.stat().st_size / 1e3:.0f} kB)")
-    print("Load it onto another copy of the brain with scripts/transfer_fly.py")
+    print("Load it onto another copy of the brain with flybrain transfer-fly")
 
 
 if __name__ == "__main__":

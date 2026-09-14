@@ -1,5 +1,68 @@
 # Known issues
 
+## Running on Windows
+
+The package installs and runs on Windows; the core path is verified end to end
+(install, `flybrain doctor`, table download, Feather parse, cell-type query) on
+Windows 10 with Python 3.12.10. Three things differ from Linux and are worth
+knowing before you debug something that is not a bug.
+
+**Brian2 needs MSVC for its fast path.** Without a C++ compiler, Brian2 falls
+back to numpy code generation and the LIF numbers in FINDINGS.md become
+unreachably slow. It does not announce this. Install it once:
+
+```
+winget install --id Microsoft.VisualStudio.2022.BuildTools `
+  --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
+
+`flybrain doctor` reports `compiler yes`/`no`. It detects MSVC through
+`vswhere`, not by looking for `cl.exe` on PATH — `cl` is only on PATH inside a
+Developer Command Prompt, so a PATH check reports "no compiler" on a machine
+that has one.
+
+**PyPI torch on Windows is CPU-only, silently.** `pip install flybrain[torch]`
+gives you `2.14.0+cpu`, and `pick_device("auto")` then reports
+`cpu (no CUDA available)` on a machine with a perfectly good GPU. This is the
+Windows counterpart of the `+cpu` trap already documented in
+`requirements.txt` for Linux. Get the CUDA build from PyTorch's own index:
+
+```
+pip install --index-url https://download.pytorch.org/whl/cu126 torch==2.14.0+cu126
+```
+
+Check with `python -c "import torch; print(torch.__version__, torch.cuda.is_available())"`.
+Note the GPU works here under Windows with driver 610.88 even though the
+Linux side of this machine never built its kernel module (see "No GPU" below).
+
+Measured on Windows with `2.14.0+cu126`, same RTX 3050 Mobile and i7-11800H,
+30 epochs at batch 16 — CPU and GPU gains agree to six decimals, as on Linux:
+
+| circuit | synapses | CPU | CUDA | speedup |
+|---|---:|---:|---:|---:|
+| mushroom body | 82,146 | 6.03 s | 1.15 s | 5.2x |
+| lamina | 212,468 | 22.70 s | 2.55 s | 8.9x |
+| optomotor | 349,867 | 32.81 s | 3.86 s | 8.5x |
+
+The advantage grows with circuit size and with batch, so a small circuit at a
+small batch is not where to judge it: the same mushroom body at batch 32 with
+only six patterns gives 2.8x, because the GPU is mostly idle.
+
+**Long paths.** `LongPathsEnabled` is 0 by default and some packages
+(notably numpy's bundled f2py test fixtures) exceed 260 characters when the
+install prefix is already deep. Symptom is a mid-install `OSError` naming a
+very long path. Either keep the venv somewhere shallow or enable long paths:
+
+```
+# admin
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' LongPathsEnabled 1
+```
+
+**Multiprocessing is spawn, not fork.** `flybrain tune-gait` re-imports the
+module tree in every worker and each one builds its own MuJoCo model, so
+worker startup costs far more than on Linux. `--workers` now defaults to one
+per core capped at 12 rather than a hardcoded 12.
+
 ## Ground contact sensors fail to compile (flygym 2.1.0 + mujoco 3.9.0)
 
 `world.add_fly(...)` with the default `add_ground_contact_sensors=True` raises:

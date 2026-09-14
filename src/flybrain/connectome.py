@@ -1,7 +1,7 @@
 """Pull circuits out of neuPrint and turn them into weight matrices.
 
-This is the *token* path, kept for exploratory queries. The bulk tables on the
-storage volume cover the same ground without auth -- see `local_data.py`, which
+This is the *token* path, kept for exploratory queries. The bulk tables
+cover the same ground without auth -- see `local_data.py`, which
 is what the scripts actually use.
 """
 

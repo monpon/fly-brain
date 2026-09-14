@@ -7,12 +7,12 @@ The fly is given no map, no coordinates and no plan. It has:
     corridors (`odor_field.MazeOdorSource` -- the field is a geodesic, so it
     does not leak through walls);
   * a mushroom body that has been taught what that odour is worth
-    (`scripts/teach_odor.py`);
+    (`flybrain teach-odor`);
   * antennal contact sensing, which turns it away from walls it runs into.
 
-    .venv/bin/python scripts/maze_forage.py
-    .venv/bin/python scripts/maze_forage.py --rows 5 --cols 5 --seed 3
-    .venv/bin/python scripts/maze_forage.py --no-view --ms 90000
+    flybrain maze-forage
+    flybrain maze-forage --rows 5 --cols 5 --seed 3
+    flybrain maze-forage --no-view --ms 90000
 """
 
 import argparse
@@ -21,11 +21,10 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-os.environ.setdefault("MUJOCO_GL", "glfw")
+from flybrain import _platform
 
-import warnings
-warnings.filterwarnings("ignore", message=".*Wayland.*")
+_platform.setup_rendering()
+
 
 import mujoco
 import numpy as np
@@ -33,7 +32,7 @@ from flygym import Simulation
 from flygym.compose import ActuatorType, FlatGroundWorld
 from flygym.utils.math import Rotation3D
 
-from flybrain import checkpoint, maze as M, mushroom_body as MB
+from flybrain import checkpoint, config, maze as M, mushroom_body as MB
 from flybrain.antennae import ReflexParams, WallReflex
 from flybrain.body import (FLY_NAME, add_wall_proxies, build_fly,
                            joint_dof_index, neutral_targets)
@@ -46,7 +45,7 @@ from flybrain.view import Viewer
 
 
 def main(a):
-    gait_file = Path("output/gait.json")
+    gait_file = config.gait_file()
     gait = GaitParams(**json.loads(gait_file.read_text())["params"]) \
         if gait_file.exists() else GaitParams()
 

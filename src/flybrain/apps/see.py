@@ -4,17 +4,16 @@
 Renders a stimulus onto the measured hex lattice and draws both: the image as
 given, and the 892 luminance values the right eye actually reports.
 
-    .venv/bin/python scripts/see.py                       # looming disc
-    .venv/bin/python scripts/see.py --stimulus grating
-    .venv/bin/python scripts/see.py --image photo.png     # your own picture
-    .venv/bin/python scripts/see.py --stimulus looming --frames 6
+    flybrain see                       # looming disc
+    flybrain see --stimulus grating
+    flybrain see --image photo.png     # your own picture
+    flybrain see --stimulus looming --frames 6
 """
 
 import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np
 

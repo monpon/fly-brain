@@ -1,0 +1,23 @@
+{
+  "mushroom_body": {
+    "neurons": 4437,
+    "synapses": 82146,
+    "dataset": "male-cns-v1.0",
+    "fingerprint": "c7cc1d25136253de",
+    "bytes": 310192
+  },
+  "optomotor": {
+    "neurons": 18926,
+    "synapses": 349867,
+    "dataset": "male-cns-v1.0",
+    "fingerprint": "efff427585f18ece",
+    "bytes": 1803791
+  },
+  "lamina": {
+    "neurons": 20694,
+    "synapses": 212468,
+    "dataset": "male-cns-v1.0",
+    "fingerprint": "6c34015b13dcbc43",
+    "bytes": 1014219
+  }
+}

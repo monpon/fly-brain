@@ -302,7 +302,7 @@ The mushroom body decides *whether* a smell is worth approaching; the antennal
 lobe supplies *which way*. Both halves now feed the walking controller, and the
 behaviour follows what the fly was taught rather than anything hard-coded.
 
-Training (`scripts/teach_odor.py`) is two-sided differential conditioning on
+Training (`flybrain teach-odor`) is two-sided differential conditioning on
 real glomerular patterns: vinegar (DM1/VA2/DM4/DC2/VM2) paired with PAM reward,
 geosmin (DA2) with PPL1 shock, 40 epochs.
 
@@ -362,7 +362,7 @@ sum of gradients.
 
 ## Solving a maze by smell
 
-`scripts/maze_forage.py` generates a perfect maze, puts a trained-attractive
+`flybrain maze-forage` generates a perfect maze, puts a trained-attractive
 odour at the far corner, and lets the fly walk. It is given no map and no
 coordinates: two antennal concentrations, a learned valence, and antennal
 contact.
@@ -405,7 +405,7 @@ population was active during 40 training trials.
 
 ## A brain with no body: supervised training on the wiring diagram
 
-`src/flybrain/trainable.py` + `scripts/train_brain.py`. Nothing in this path
+`src/flybrain/trainable.py` + `flybrain train-brain`. Nothing in this path
 imports flygym or MuJoCo -- verified by loading it and checking `sys.modules`.
 Inputs go in as arrays, outputs come out as arrays.
 
@@ -596,7 +596,7 @@ unlocks T4/T5 and the DNp01 looming test.
 
 Three different things get called memory. They behave nothing alike here.
 
-`scripts/remember.py` runs all three.
+`flybrain remember` runs all three.
 
 ### Synaptic: pattern to value
 
@@ -833,7 +833,7 @@ mapping that would have to come from experiment.
 
 ### Pong does not work, and the reason is instructive
 
-`scripts/pong.py` is a playable tkinter window. The fly is taught only by
+`flybrain pong` is a playable tkinter window. The fly is taught only by
 reward on intercept and punishment on miss. Over 500 balls:
 
 | balls | hit rate | depressed |

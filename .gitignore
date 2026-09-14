@@ -2,10 +2,23 @@
 __pycache__/
 *.pyc
 .env
+build/
+dist/
+*.egg-info/
 
 # Scripts regenerate everything here: renders, logs, checkpoints, and the
 # exploratory gait variants. The tuned gait is the exception -- it is 1.4 KB
 # of text, costs ~10 min of CMA-ES to rebuild, and is loaded as a default by
-# forage.py and maze_forage.py.
+# forage and maze-forage.
 output/*
 !output/gait.json
+
+# Partial downloads. `data.py` only renames a file into place once the
+# transfer completes, so a `.part` left behind is a interrupted download and
+# never something to keep.
+*.part
+
+# NOT ignored, deliberately: src/flybrain/_bundled/*.npz
+# Those are the precomputed circuits that ship in the wheel and make
+# `import flybrain` work with no download. Rebuild them with
+# `flybrain bundle` on a machine that has the full tables.

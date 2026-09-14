@@ -3,16 +3,15 @@
 
 Wide-field visual motion -> direction-selective cells -> wide-field integrators
 -> a descending steering command. No neuPrint token required; reads the Feather
-files on the storage volume.
+files, downloading them on first use.
 
-    .venv/bin/python scripts/fetch_optomotor.py
+    flybrain fetch-optomotor
 """
 
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np
 

@@ -269,12 +269,21 @@ def save_cache(mb: MushroomBody, path=None):
 
 
 def load_cache(path=None) -> MushroomBody:
+    """The cached mushroom body, extracting it first if there is not one yet.
+
+    The full `MushroomBody` carries roles the bundled `circuits.mushroom_body()`
+    Circuit does not -- APL, and the DANs that make the dopamine rule possible
+    -- so it cannot be served from the bundle and genuinely needs the tables.
+    Extracting takes a couple of minutes and then caches, which is better than
+    telling somebody to go and run a different command first.
+    """
     path = path or cache_path()
     if not path.exists():
-        raise SystemExit(
-            f"No cached mushroom body at {path}\n"
-            "Run: .venv/bin/python scripts/fetch_mushroom_body.py"
-        )
+        print(f"no cached mushroom body at {path}; extracting it now "
+              "(a few minutes, once)", flush=True)
+        mb = extract()
+        save_cache(mb, path)
+        return mb
     with np.load(path, allow_pickle=False) as data:
         return MushroomBody(
             dataset=str(data["dataset"]),

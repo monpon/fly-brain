@@ -4,10 +4,10 @@
 The wiring is the fly's and stays the fly's: no synapse is created, destroyed
 or sign-flipped. Training sets one non-negative gain per existing synapse.
 
-    .venv/bin/python scripts/train_brain.py                    # 6 odours -> 6 MBONs
-    .venv/bin/python scripts/train_brain.py --task random --classes 10
-    .venv/bin/python scripts/train_brain.py --data mine.npz    # your own X, Y
-    .venv/bin/python scripts/train_brain.py --types 'KC.*' 'MBON.*' \
+    flybrain train-brain                    # 6 odours -> 6 MBONs
+    flybrain train-brain --task random --classes 10
+    flybrain train-brain --data mine.npz    # your own X, Y
+    flybrain train-brain --types 'KC.*' 'MBON.*' \
         --inputs 'KC.*' --outputs 'MBON.*'
 
 `mine.npz` must hold `X` (trials, n_inputs) and `Y` (trials, n_outputs).
@@ -18,11 +18,10 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np
 
-from flybrain import mushroom_body as MB, odors, trainable
+from flybrain import circuits, mushroom_body as MB, odors, trainable
 
 OUT = Path("output/trained_brain.npz")
 
@@ -69,7 +68,9 @@ def main(a):
     if a.types:
         circuit = trainable.build(a.types, a.inputs, a.outputs)
     else:
-        circuit = trainable.from_mushroom_body(MB.load_cache())
+        # The bundled copy is byte-for-byte what from_mushroom_body() builds,
+        # so the default path needs no tables and no download.
+        circuit = circuits.mushroom_body()
 
     print(f"circuit: {circuit.summary()}")
     print("  " + ", ".join(f"{t} x{c}" for t, c in circuit.type_counts(6)))

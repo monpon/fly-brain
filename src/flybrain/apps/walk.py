@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Run the connectome VNC in closed loop with the body. No CPG.
 
-    .venv/bin/python scripts/walk.py                    # DNp09, flat ground
-    .venv/bin/python scripts/walk.py --ms 2000 --maze
+    flybrain walk                    # DNp09, flat ground
+    flybrain walk --ms 2000 --maze
 """
 
 import argparse
@@ -11,11 +11,10 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-os.environ.setdefault("MUJOCO_GL", "glfw")
+from flybrain import _platform
 
-import warnings
-warnings.filterwarnings("ignore", message=".*Wayland.*")
+_platform.setup_rendering()
+
 
 import numpy as np
 from flygym import Simulation

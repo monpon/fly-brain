@@ -6,12 +6,12 @@ odour at its two antennae, and the mushroom body's learned verdict on what
 each smell is worth. With a rewarded odour and a punished one in the same
 arena, that is enough to walk toward one and away from the other.
 
-    .venv/bin/python scripts/forage.py                  # good + bad source
-    .venv/bin/python scripts/forage.py --untrained      # before conditioning
-    .venv/bin/python scripts/forage.py --no-bad         # single source
-    .venv/bin/python scripts/forage.py --distance 60 --ms 20000 --no-view
+    flybrain forage                  # good + bad source
+    flybrain forage --untrained      # before conditioning
+    flybrain forage --no-bad         # single source
+    flybrain forage --distance 60 --ms 20000 --no-view
 
-Train the preference first with scripts/teach_odor.py.
+Train the preference first with flybrain teach-odor.
 """
 
 import argparse
@@ -20,11 +20,10 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-os.environ.setdefault("MUJOCO_GL", "glfw")
+from flybrain import _platform
 
-import warnings
-warnings.filterwarnings("ignore", message=".*Wayland.*")
+_platform.setup_rendering()
+
 
 import mujoco
 import numpy as np
@@ -37,7 +36,7 @@ from flybrain.cpg import CPG, GaitParams
 from flybrain.learning import FlyBrain
 from flybrain.navigate import NavParams, OdorNavigator
 from flybrain.olfactory_brain import BrainNavParams, BrainNavigator
-from flybrain import checkpoint, mushroom_body as MB
+from flybrain import checkpoint, config, mushroom_body as MB
 from flybrain.olfaction import Nose, OdorSource
 from flybrain.view import Viewer
 
@@ -48,7 +47,7 @@ def place(distance: float, bearing_deg: float) -> np.ndarray:
 
 
 def main(a):
-    gait_file = Path("output/gait.json")
+    gait_file = config.gait_file()
     params = GaitParams(**json.loads(gait_file.read_text())["params"]) \
         if gait_file.exists() else GaitParams()
 

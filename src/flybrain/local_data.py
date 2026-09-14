@@ -1,10 +1,15 @@
-"""Read the bulk male-CNS tables off the storage volume.
+"""Read the bulk male-CNS tables.
 
 This is the no-token path: the same data neuPrint serves, as flat Feather
 files. Slower to get started (a 1.1 GB download), but then everything is
 local, offline, and reproducible.
 
-Files expected in `config.dataset_dir()`:
+The download happens by itself the first time a table is touched -- see
+`data.py` -- into whichever directory `config.data_dir()` resolves to on this
+OS. Nothing here assumes a particular mount point, and most of the package
+never gets this far, because the circuits worth starting from are bundled.
+
+Files, in `config.dataset_dir()`:
     connectome-weights-*.feather    synapse counts per connected pair
     body-annotations-*.feather      cell type / instance / soma side per body
     body-neurotransmitters-*.feather  predicted NT per body
@@ -33,12 +38,15 @@ INHIBITORY = {"gaba", "glutamate"}
 
 
 def _path(key: str):
-    path = config.dataset_dir() / FILES[key]
-    if not path.exists():
-        raise SystemExit(
-            f"Missing {path.name}\nRun: .venv/bin/python scripts/download_data.py"
-        )
-    return path
+    """Path to one table, fetching it if this machine does not have it yet.
+
+    Downloading on demand rather than failing with instructions is the whole
+    difference between "clone it and play" and "clone it, read the README,
+    find a 1.1 GB download, come back tomorrow".
+    """
+    from . import data
+
+    return data.fetch(FILES[key])
 
 
 @functools.lru_cache(maxsize=None)

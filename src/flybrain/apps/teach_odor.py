@@ -5,11 +5,11 @@ Differential conditioning with reinforcement on both sides: vinegar arrives
 with sugar (PAM dopamine), geosmin with shock (PPL1). Afterwards the fly's
 valence for the rewarded odour is higher and the punished one has crossed into
 negative -- which is what makes it walk toward one source and away from the
-other in scripts/forage.py.
+other in flybrain forage.
 
-    .venv/bin/python scripts/teach_odor.py
-    .venv/bin/python scripts/teach_odor.py --good banana --bad almond
-    .venv/bin/python scripts/teach_odor.py --epochs 80
+    flybrain teach-odor
+    flybrain teach-odor --good banana --bad almond
+    flybrain teach-odor --epochs 80
 
 Writes output/odor_trained.flyckpt.
 """
@@ -18,7 +18,6 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from flybrain import checkpoint, mushroom_body as MB, odors
 from flybrain.learning import FlyBrain, LearningParams
@@ -80,7 +79,7 @@ def main(a) -> None:
         notes=f"{a.epochs} epochs, separation {after['separation']:+.5f}",
     )
     print(f"\nsaved -> {path}  ({path.stat().st_size / 1e3:.0f} kB)")
-    print("Now run: .venv/bin/python scripts/forage.py "
+    print("Now run: flybrain forage "
           f"--good {a.good} --bad {a.bad}")
 
 

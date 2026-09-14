@@ -4,14 +4,13 @@
 Olfactory PNs -> Kenyon cells -> MBONs, with dopaminergic neurons innervating
 each compartment. The KC->MBON synapses are the plastic ones.
 
-    .venv/bin/python scripts/fetch_mushroom_body.py
+    flybrain fetch-mushroom-body
 """
 
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np
 

@@ -7,27 +7,26 @@ Three separate senses of "memory", measured rather than asserted:
   persist    train on images, save, reload into a fresh net, recall them
   attractor  does activity outlive the stimulus that caused it
 
-    .venv/bin/python scripts/remember.py                 # all three
-    .venv/bin/python scripts/remember.py capacity
-    .venv/bin/python scripts/remember.py attractor
+    flybrain remember                 # all three
+    flybrain remember capacity
+    flybrain remember attractor
 """
 
 import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np
 
-from flybrain import mushroom_body as MB, trainable as T, vision as V
+from flybrain import circuits, mushroom_body as MB, trainable as T, vision as V
 
 STORE = Path("output/seen_memory.npz")
 
 
 def capacity(a):
     """Synaptic memory: how many associations survive, and how noisy a cue."""
-    c = T.from_mushroom_body(MB.load_cache())
+    c = circuits.mushroom_body()
     n_in, n_out = len(c.input_idx), len(c.output_idx)
     print(f"mushroom body: {c.n} neurons, {n_in} PN in, {n_out} MBON out")
     print(f"\n{'patterns':>9s} {'clean':>7s} {'10% noise':>10s} {'30% noise':>10s}")

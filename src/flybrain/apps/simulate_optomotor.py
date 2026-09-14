@@ -5,16 +5,15 @@ Drives one T4 subtype (one preferred direction of ON-edge motion) with Poisson
 input and measures the firing rate of every downstream cell type, including the
 DNa02 steering command.
 
-    .venv/bin/python scripts/simulate_optomotor.py            # T4a
-    .venv/bin/python scripts/simulate_optomotor.py T4b 150    # type, Hz
-    .venv/bin/python scripts/simulate_optomotor.py --raw       # no normalization
+    flybrain simulate-optomotor            # T4a
+    flybrain simulate-optomotor T4b 150    # type, Hz
+    flybrain simulate-optomotor --raw       # no normalization
 """
 
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np
 from brian2 import ms
@@ -31,7 +30,7 @@ REPORT_TYPES = ["Mi1", "Mi4", "Mi9", "T4a", "T4b", "T4c", "T4d",
 def main(stim_type: str, rate: float) -> None:
     path = config.cache_dir() / "optomotor.npz"
     if not path.exists():
-        raise SystemExit("Run scripts/fetch_optomotor.py first.")
+        raise SystemExit("Run flybrain fetch-optomotor first.")
 
     data = np.load(path, allow_pickle=True)
     W, types = data["W"], data["types"].astype(str)

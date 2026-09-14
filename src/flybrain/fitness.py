@@ -12,11 +12,11 @@ and without the penalties the optimiser finds exactly that.
 
 from __future__ import annotations
 
-import os
-
 import numpy as np
 
-os.environ.setdefault("MUJOCO_GL", "glfw")
+from . import _platform
+
+_platform.setup_rendering()
 
 # First pass used much weaker penalties and the optimiser exploited them: it
 # found a gait with 3 degrees of leg lift that shuffles at 12 mm/s while rolling

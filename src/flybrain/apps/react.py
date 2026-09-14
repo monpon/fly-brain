@@ -5,17 +5,16 @@ No training. Gains sit at their anatomical value, so what comes back is the
 wiring's own response -- which cell types care about this stimulus, and by how
 much, relative to a blank field.
 
-    .venv/bin/python scripts/react.py                      # dark vs bright flash
-    .venv/bin/python scripts/react.py --stimulus looming
-    .venv/bin/python scripts/react.py --image photo.png
-    .venv/bin/python scripts/react.py --types 'L[1-5]' 'Tm.*' 'T4.*' --top 15
+    flybrain react                      # dark vs bright flash
+    flybrain react --stimulus looming
+    flybrain react --image photo.png
+    flybrain react --types 'L[1-5]' 'Tm.*' 'T4.*' --top 15
 """
 
 import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np
 

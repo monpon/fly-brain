@@ -5,9 +5,9 @@ Black-box optimisation over the seven numbers that define the gait. Each
 candidate is simulated for two seconds and scored on forward distance, minus
 penalties for heading drift, body roll, sideways drift, and bouncing.
 
-    .venv/bin/python scripts/train_gait.py                 # ~10 min on 8 cores
-    .venv/bin/python scripts/train_gait.py --iters 40 --pop 12
-    .venv/bin/python scripts/train_gait.py --show          # replay the best
+    flybrain train-gait                 # ~10 min on 8 cores
+    flybrain train-gait --iters 40 --pop 12
+    flybrain train-gait --show          # replay the best
 
 Writes output/gait.json, which walk_cpg.py loads automatically.
 """
@@ -18,14 +18,13 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np
 
 from flybrain.cpg import GaitParams
 from flybrain.fitness import evaluate
 
-OUT = Path("output/gait.json")
+OUT = Path("output/gait.json")   # a retune always writes locally, not into the package
 
 # name, low, high
 SPACE = [

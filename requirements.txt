@@ -1,12 +1,20 @@
+# This file is the *measured* environment: the exact versions every number in
+# docs/FINDINGS.md was produced against, on Linux with CUDA. It is a lockfile
+# for reproducing those results, not the way to install the package.
+#
+# To install and use it, do this instead -- it works on Windows, macOS and
+# Linux, and resolves versions for whatever Python you have:
+#
+#   pip install -e .              core: load circuits, inspect wiring
+#   pip install -e '.[all]'       everything
+#
+# Ranges live in pyproject.toml. Pin from here only when you are trying to
+# reproduce a published figure.
+#
 # Python 3.12. Newer versions have no wheels for Brian2 / torch / MuJoCo.
 #
 #   uv venv --python 3.12 .venv
 #   uv pip install -r requirements.txt
-#
-# This venv is built with uv and has no `pip` inside it -- `.venv/bin/pip`
-# will not exist. Use `uv pip`, or `python -m venv` if you want pip.
-#
-# Versions are the ones this was developed and measured against.
 
 # Connectome data
 neuprint-python==0.6.3

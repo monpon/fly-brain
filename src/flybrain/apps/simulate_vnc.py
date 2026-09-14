@@ -5,9 +5,9 @@ No CPG. Stimulates a descending neuron type, runs the 15,183-neuron
 descending -> VNC -> motor network as LIF, converts motor neuron firing into
 per-joint commands, and tests whether the output is rhythmic.
 
-    .venv/bin/python scripts/simulate_vnc.py                # DNp09, forward
-    .venv/bin/python scripts/simulate_vnc.py MDN 150        # backward walking
-    .venv/bin/python scripts/simulate_vnc.py DNp09 100 --norm 12
+    flybrain simulate-vnc                # DNp09, forward
+    flybrain simulate-vnc MDN 150        # backward walking
+    flybrain simulate-vnc DNp09 100 --norm 12
 """
 
 import argparse
@@ -15,7 +15,6 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np
 from brian2 import ms

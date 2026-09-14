@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """Watch the fly walk, driven by the CPG. Opens a live window by default.
 
-    .venv/bin/python scripts/walk_cpg.py                 # flat ground
-    .venv/bin/python scripts/walk_cpg.py --maze          # in the maze
-    .venv/bin/python scripts/walk_cpg.py --turn 0.5      # steer right
-    .venv/bin/python scripts/walk_cpg.py --no-view       # headless
+    flybrain walk-cpg                 # flat ground
+    flybrain walk-cpg --maze          # in the maze
+    flybrain walk-cpg --turn 0.5      # steer right
+    flybrain walk-cpg --no-view       # headless
 """
 
 import argparse
@@ -12,18 +12,17 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-os.environ.setdefault("MUJOCO_GL", "glfw")
+from flybrain import _platform
 
-import warnings
-warnings.filterwarnings("ignore", message=".*Wayland.*")
+_platform.setup_rendering()
+
 
 import numpy as np
 from flygym import Simulation
 from flygym.compose import FlatGroundWorld
 from flygym.utils.math import Rotation3D
 
-from flybrain import maze as M
+from flybrain import config, maze as M
 from flybrain.body import build_fly
 from flybrain.cpg import TETRAPOD, TRIPOD, CPGWalker, GaitParams
 from flybrain.view import Viewer
@@ -44,7 +43,7 @@ def main(a):
     sim = Simulation(world)
     sim.reset()
 
-    trained = Path("output/gait.json")
+    trained = config.gait_file()
     if trained.exists() and not a.hand_tuned:
         import json
         saved = json.loads(trained.read_text())

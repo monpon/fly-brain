@@ -25,9 +25,9 @@ it closed the gap), and feeding a longer history of positions and velocities
 so the fly can see where the ball is going. Both are plausible fixes and
 neither has been measured.
 
-    .venv/bin/python scripts/pong.py
-    .venv/bin/python scripts/pong.py --load output/pong.flyckpt   # a taught fly
-    .venv/bin/python scripts/pong.py --explore 0 --load output/pong.flyckpt
+    flybrain pong
+    flybrain pong --load output/pong.flyckpt   # a taught fly
+    flybrain pong --explore 0 --load output/pong.flyckpt
 
 Press `s` to save the fly's memory, `r` to reset the score, `q` to quit.
 
@@ -58,7 +58,6 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import tkinter as tk
 

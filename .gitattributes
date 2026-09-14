@@ -1,0 +1,12 @@
+# Keep LF in the repository whatever the checkout platform does. Without this,
+# a Windows clone with core.autocrlf=true rewrites every file on checkout and
+# every diff between the two machines is 100% changed lines.
+* text=auto eol=lf
+
+# The bundled circuits are compressed arrays. Never touch them.
+*.npz binary
+*.feather binary
+*.flyckpt binary
+*.png binary
+*.jpg binary
+*.mp4 binary

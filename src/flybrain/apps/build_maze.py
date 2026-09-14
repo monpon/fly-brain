@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Generate a maze, drop the fly at the entrance, and render it.
 
-    .venv/bin/python scripts/build_maze.py
-    .venv/bin/python scripts/build_maze.py --rows 8 --cols 8 --seed 3
+    flybrain build-maze
+    flybrain build-maze --rows 8 --cols 8 --seed 3
 """
 
 import argparse
@@ -10,11 +10,10 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-os.environ.setdefault("MUJOCO_GL", "glfw")
+from flybrain import _platform
 
-import warnings
-warnings.filterwarnings("ignore", message=".*Wayland.*")
+_platform.setup_rendering()
+
 
 import numpy as np
 from flygym import Simulation

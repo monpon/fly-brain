@@ -162,7 +162,7 @@ def build(types: list[str], inputs: list[str], outputs: list[str],
 def from_mushroom_body(mb, *, budget: float = 1.0) -> Circuit:
     """The olfactory learning pathway as a trainable circuit: PN -> KC -> MBON.
 
-    Convenient because it is already cached (`scripts/fetch_mushroom_body.py`)
+    Convenient because it is already cached (`flybrain fetch-mushroom-body`)
     and because it is the one circuit here whose *biological* learning rule is
     also implemented, in `learning.py`. Training the same wiring both ways --
     dopamine-gated depression against gradient descent -- is a comparison

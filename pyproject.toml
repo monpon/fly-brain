@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flybrain"
+version = "0.1.0"
+description = "Run the male Drosophila connectome: spiking, trainable, and in a body"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["connectome", "drosophila", "neuroscience", "simulation"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+# Deliberately small. Enough to load a circuit, inspect the wiring, and ask
+# what connects to what -- on any machine, with no compiler and no GPU, in
+# about thirty seconds. Everything heavier is an extra.
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.0",
+    "pyarrow>=14.0",
+]
+
+[project.optional-dependencies]
+# Gradient training, memory, checkpoints.
+torch = ["torch>=2.2"]
+
+# Brian2 LIF simulation. On Windows this also wants MSVC Build Tools for the
+# fast codegen path -- `flybrain doctor` reports whether it found a compiler.
+spiking = ["brian2>=2.7"]
+
+# The physics body: MuJoCo, NeuroMechFly, mazes, gait optimisation.
+body = [
+    "mujoco>=3.9",
+    "flygym>=2.1,<3",
+    "scipy>=1.11",
+    "cma>=3.3",
+]
+
+# Figures, the retina viewer, the pong window, loading your own images.
+plot = ["matplotlib>=3.8", "pillow>=10.0"]
+
+# The authenticated neuPrint path. Not needed: the bulk tables are public.
+neuprint = ["neuprint-python>=0.6"]
+
+all = [
+    "flybrain[torch]",
+    "flybrain[spiking]",
+    "flybrain[body]",
+    "flybrain[plot]",
+    "flybrain[neuprint]",
+]
+
+[project.scripts]
+flybrain = "flybrain.cli:main"
+
+[project.urls]
+Dataset = "https://www.janelia.org/project-team/flyem/male-cns-connectome"
+neuPrint = "https://neuprint.janelia.org"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# The precomputed circuits that make `import flybrain` useful offline.
+[tool.setuptools.package-data]
+flybrain = ["_bundled/*.npz", "_bundled/*.json"]

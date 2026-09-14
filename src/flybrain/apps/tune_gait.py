@@ -13,8 +13,8 @@ Two things changed from `train_gait.py`:
   converges on eleven in a few hundred. The bottleneck here was never
   throughput, it was sample efficiency.
 
-    .venv/bin/python -u scripts/tune_gait.py
-    .venv/bin/python -u scripts/tune_gait.py --gens 40 --workers 12
+    flybrain tune-gait
+    flybrain tune-gait --gens 40 --workers 12
 
 Writes output/gait.json.
 """
@@ -26,14 +26,14 @@ import time
 from multiprocessing import Pool
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np
 
+from flybrain import _platform, config
 from flybrain.cpg import GaitParams
 from flybrain.fitness import evaluate
 
-OUT = Path("output/gait.json")
+OUT = Path("output/gait.json")   # a retune always writes locally, not into the package
 
 # name, low, high, start
 SPACE = [
@@ -141,7 +141,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--gens", type=int, default=40)
     ap.add_argument("--pop", type=int, default=14)
-    ap.add_argument("--workers", type=int, default=12)
+    ap.add_argument("--workers", type=int, default=_platform.default_workers(),
+                    help="processes; defaults to one per core, capped at 12")
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--compare", default="output/gait.json")
+    ap.add_argument("--compare", default=str(config.gait_file()))
     main(ap.parse_args())
