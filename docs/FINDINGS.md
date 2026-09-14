@@ -681,3 +681,95 @@ and a heading that updates as the fly turns. Two changes lift it: index the
 input per timestep, and make `tau` a learnable per-cell-type parameter, which
 is the delay line a Hassenstein-Reichardt correlator is built from and what
 flyvis learns as `tau_ti`.
+
+### A memory state is a file you can move
+
+`BrainNet.save`/`load` key everything to connectome body ids -- synapses on
+`(pre, post)`, bias per neuron, input gain per input cell. Nothing is
+positional, so a memory survives being re-extracted, reordered, moved to
+another machine, or dropped into a circuit it was not trained on.
+
+Trained on a GPU with non-default dynamics, loaded on a CPU into a network
+built fresh from the anatomy:
+
+    trained on cuda (steps=6 tau=3): 100.0%
+    fresh on CPU, default dynamics :   0.0%
+    after load on CPU              : 100.0%     exact round trip
+
+The dynamics travel with the gains. `steps`, `tau`, `dt`, `rate` and `rmax`
+are saved and restored, because the gains were fit assuming them -- restoring
+gains alone gives a network that holds the memory and does not reproduce it.
+A `saturating` memory loaded into a `softplus` network is a different network.
+
+`load` reports whether the target can actually *use* what it loaded:
+
+| target circuit | synapse coverage | inputs | outputs | usable |
+|---|---:|---:|---:|---|
+| same circuit, rebuilt | 100% | 100% | 100% | yes, 100% recall |
+| `KC.*` `MBON.*` `APL` | 8% | 0% | 100% | memory, no interface |
+| optic lobe | 0% | 0% | 0% | nothing transferred |
+
+The middle row is the case worth understanding. The gains transferred --
+61,210 synapses of the mushroom body landed in a 722,090-synapse circuit --
+but that circuit takes Kenyon cells as input rather than projection neurons,
+so the same vector no longer means the same thing. Portability of a memory is
+not portability of the interface.
+
+## The dopamine rule accumulates; gradient descent does not
+
+Teaching a second thing with gradient descent erases the first, completely:
+
+    learned odours              : 100.0%
+    then learned 10 new patterns: 100.0%
+    do the odours survive       :   0.0%
+
+Training on both together recovers 100% on each, so this is interference
+rather than capacity. It means a gradient-trained memory file holds only what
+was trained in one sitting.
+
+`learning.py` does not have the problem. Three odours taught one at a time,
+never retraining the earlier ones:
+
+| taught | retained at the end |
+|---|---:|
+| vinegar (1st, rewarded) | 86% |
+| geosmin (2nd, punished) | 91% |
+| banana (3rd, rewarded) | 100% |
+
+Signs stay correct throughout -- vinegar +0.00595, geosmin -0.00170, banana
++0.00413 against a naive +0.00342 / +0.00021 / +0.00126. Only **8.4% of
+synapses end up depressed**, which is the reason: each odour recruits a
+different sparse ~5% subset of Kenyon cells, so the memories barely overlap.
+Sparse coding is what buys incremental learning.
+
+(A first attempt measured 18% retention. That was a broken test loop calling
+`reset_state()` between trials, which discards the learned gains entirely
+rather than just the eligibility trace. Clear `_trace`, as `tasks.py` does.)
+
+### Memories from separate flies merge
+
+Depression-only multiplicative gains compose. Two brains trained
+independently, combined by taking the lower gain per synapse:
+
+    fly A (vinegar+) : vinegar +0.00637  geosmin +0.00021
+    fly B (geosmin-) : vinegar +0.00342  geosmin -0.00191
+    merged (min)     : vinegar +0.00636  geosmin -0.00190
+
+100% of each memory survives, and the depressed fractions add (3.3% + 2.9% ->
+6.2%). Skills can therefore be trained separately and combined, rather than
+having to share one training run.
+
+### .flyckpt round-trips exactly
+
+Three odours taught by the dopamine rule, saved, loaded into a fresh brain:
+
+    EXACT gain array equality : True
+    EXACT readout equality    : True
+    valences identical        : True
+    trials restored           : 120 -> 120
+    params restored           : True
+    matched 61210  (100.0% of target)
+
+Not approximately -- `np.array_equal`. The format is a versioned zip holding
+a readable manifest plus body-id-keyed arrays, so `unzip -p f.flyckpt
+manifest.json` tells you what a checkpoint is without loading the connectome.

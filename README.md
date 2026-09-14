@@ -287,6 +287,13 @@ Activity memory needs `BrainNet(rate="saturating")`. With unbounded rates the
 heading ring only decays or explodes; bounded, it holds its state with no
 input -- though only one state, not a heading.
 
+Memory states are portable. `save()`/`load()` key everything to connectome
+body ids, and the dynamics travel with the gains, so a file trained on one
+machine loads into a brain rebuilt from scratch on another and recalls
+exactly. `load()` reports coverage and whether the target's input and output
+populations match -- gains transfer regardless, but a circuit with different
+inputs has the memory and no interface to it.
+
 Nothing temporal can be held yet, because `forward` applies the same input at
 every timestep. See [docs/FINDINGS.md](docs/FINDINGS.md).
 

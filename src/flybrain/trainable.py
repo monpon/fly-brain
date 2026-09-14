@@ -493,42 +493,144 @@ class BrainNet:
                 in_gain=self.in_gain.cpu().numpy(),
                 pre_body=self.circuit.body_ids[self.circuit.pre],
                 post_body=self.circuit.body_ids[self.circuit.post],
+                # Per-neuron state is keyed by body id too, so a memory can be
+                # slotted into a *different* circuit -- a bigger one that
+                # contains these cells, or the same cells re-extracted in
+                # another order. Without these the arrays are positional and
+                # only reload into an identically shaped network.
+                bias_body=self.circuit.body_ids,
+                in_body=self.circuit.body_ids[self.circuit.input_idx],
+                out_body=self.circuit.body_ids[self.circuit.output_idx],
                 fingerprint=np.array(self.circuit.fingerprint()),
                 dataset=np.array(self.circuit.dataset),
+                # The dynamics are part of the trained state: the gains were
+                # fit assuming these, so restoring gains without them gives a
+                # network that has the memory and does not reproduce it.
                 steps=np.array(self.steps), tau=np.array(self.tau),
+                dt=np.array(self.dt), rate=np.array(self.rate_name),
+                rmax=np.array(self.rmax),
             )
         return str(path)
 
-    def load(self, path) -> dict:
-        """Load a trained state, matching synapses by body ID pair.
+    def load(self, path, *, strict: bool = False) -> dict:
+        """Load a trained state, matching everything by connectome body ID.
 
-        Row order is not assumed to survive re-extraction, so gains are joined
-        on (pre body ID, post body ID) exactly as `checkpoint.py` does.
+        Nothing is positional. Synapses join on (pre body id, post body id),
+        per-neuron bias and per-input gain join on body id. A memory state is
+        therefore portable: it can be loaded into the same circuit
+        re-extracted in a different order, into a larger circuit that contains
+        these cells, or into a circuit that only partly overlaps. Whatever is
+        not in the file keeps its anatomical value, so a partial memory is a
+        partial update rather than an error.
+
+        `strict=True` refuses anything but an exact topology match, for when
+        silent partial loading would be a bug rather than a feature.
+
+        Returns the coverage, which is worth looking at: 12% matched means
+        you loaded a mushroom-body memory into an optic-lobe circuit.
         """
         import torch
 
         data = np.load(path, allow_pickle=False)
-        saved_key = np.stack([data["pre_body"], data["post_body"]])
-        mine = np.stack([self.circuit.body_ids[self.circuit.pre],
-                         self.circuit.body_ids[self.circuit.post]])
 
-        def key(a):
-            return a[0].astype(np.int64) * (10 ** 10) + a[1].astype(np.int64)
+        # Body ids are only meaningful inside one connectome release. Loading
+        # across releases matches almost nothing and looks like an empty file
+        # rather than the version mismatch it is, so say so.
+        theirs = str(data["dataset"]) if "dataset" in data else ""
+        if theirs and theirs != self.circuit.dataset:
+            raise SystemExit(
+                f"{path} was trained on {theirs}, this circuit is "
+                f"{self.circuit.dataset}. Body ids do not carry across "
+                "connectome releases, so nothing would match. Re-extract the "
+                "circuit from the same release, or retrain."
+            )
+        same = str(data["fingerprint"]) == self.circuit.fingerprint()
+        if strict and not same:
+            raise SystemExit(
+                f"{path} was trained on a different topology "
+                f"({data['fingerprint']} vs {self.circuit.fingerprint()}); "
+                "pass strict=False to load what overlaps"
+            )
 
-        lookup = {k: i for i, k in enumerate(key(saved_key))}
-        rows = np.array([lookup.get(k, -1) for k in key(mine)])
-        found = rows >= 0
+        def join(saved_ids, mine_ids, values, fallback):
+            """Values from the file, indexed by body id, defaulting to `fallback`."""
+            lookup = {int(b): i for i, b in enumerate(saved_ids)}
+            rows = np.array([lookup.get(int(b), -1) for b in mine_ids])
+            hit = rows >= 0
+            out = np.full(len(mine_ids), fallback, dtype=np.float32)
+            out[hit] = values[rows[hit]]
+            return out, hit
 
-        gain = np.zeros(self.circuit.n_synapses, dtype=np.float32)
-        gain[found] = data["log_gain"][rows[found]]
+        pair = lambda a, b: (a.astype(np.int64) * (10 ** 10)
+                             + b.astype(np.int64))
+        syn, hit_syn = join(
+            pair(data["pre_body"], data["post_body"]),
+            pair(self.circuit.body_ids[self.circuit.pre],
+                 self.circuit.body_ids[self.circuit.post]),
+            data["log_gain"], 0.0)
+
+        # Older files stored bias and in_gain positionally.
+        if "bias_body" in data:
+            bias, hit_b = join(data["bias_body"], self.circuit.body_ids,
+                               data["bias"], 0.0)
+            ingain, _ = join(data["in_body"],
+                             self.circuit.body_ids[self.circuit.input_idx],
+                             data["in_gain"], 1.0)
+        elif len(data["bias"]) == self.circuit.n:
+            bias, hit_b = data["bias"], np.ones(self.circuit.n, bool)
+            ingain = data["in_gain"]
+        else:
+            raise SystemExit(
+                f"{path} predates body-id keying and its shapes do not match "
+                f"this circuit ({len(data['bias'])} vs {self.circuit.n} "
+                "neurons). Re-save it from the circuit it was trained on."
+            )
+
         with torch.no_grad():
-            self.log_gain.copy_(torch.as_tensor(gain, device=self.device))
-            self.bias.copy_(torch.as_tensor(data["bias"], device=self.device))
-            self.in_gain.copy_(torch.as_tensor(data["in_gain"],
+            self.log_gain.copy_(torch.as_tensor(syn, device=self.device))
+            self.bias.copy_(torch.as_tensor(np.asarray(bias, np.float32),
+                                            device=self.device))
+            self.in_gain.copy_(torch.as_tensor(np.asarray(ingain, np.float32),
                                                device=self.device))
+
+        # Restore the dynamics the gains were fit under, unless the caller
+        # deliberately set something else.
+        changed = {}
+        for attr, field, default in (("steps", "steps", None),
+                                     ("tau", "tau", None),
+                                     ("dt", "dt", 1.0),
+                                     ("rate_name", "rate", "softplus"),
+                                     ("rmax", "rmax", 5.0)):
+            if field not in data:
+                continue
+            want = data[field].item() if data[field].ndim == 0 else data[field]
+            want = str(want) if field == "rate" else type(default or 0)(want) \
+                if default is not None else want
+            have = getattr(self, attr)
+            if want != have:
+                changed[attr] = (have, want)
+            setattr(self, attr, want)
+
+        # Whether the target can actually *use* the memory. Gains transfer by
+        # body id regardless, but if the input or output population differs
+        # you have the memory and no interface to it: the same vector no
+        # longer means the same thing.
+        io = {}
+        for field, idx in (("in_body", self.circuit.input_idx),
+                           ("out_body", self.circuit.output_idx)):
+            if field in data:
+                mine = set(int(b) for b in self.circuit.body_ids[idx])
+                theirs = set(int(b) for b in data[field])
+                io[field[:-5]] = (len(mine & theirs) / max(len(theirs), 1)
+                                  if theirs else 0.0)
+
         return {
-            "matched": int(found.sum()),
-            "total": int(len(found)),
-            "fingerprint_match": str(data["fingerprint"]) ==
-                                 self.circuit.fingerprint(),
+            "synapses_matched": int(hit_syn.sum()),
+            "synapses_total": int(len(hit_syn)),
+            "coverage": float(hit_syn.mean()),
+            "neurons_matched": int(np.asarray(hit_b).sum()),
+            "fingerprint_match": same,
+            "dynamics_changed": changed,
+            "input_match": io.get("in"),
+            "output_match": io.get("out"),
         }
