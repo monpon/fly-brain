@@ -95,7 +95,9 @@ def main(a):
         else:
             print(f"controller: mushroom body, no checkpoint at {a.trained}")
         nav = BrainNavigator(brain, mb, [s.odor for s in sources],
-                             params=BrainNavParams(valence_scale=a.valence_scale),
+                             params=BrainNavParams(valence_scale=a.valence_scale,
+                                                   noise=a.noise,
+                                                   noise_tail=a.noise_tail),
                              seed=a.seed)
         print(f"learned valence: {nav.report()}")
 
@@ -196,6 +198,10 @@ if __name__ == "__main__":
                     help="run the naive brain, before conditioning")
     ap.add_argument("--tumble", action="store_true",
                     help="use the hand-written run-and-tumble controller")
+    ap.add_argument("--noise", type=float, default=0.03,
+                    help="spontaneous turn variability")
+    ap.add_argument("--noise-tail", type=float, default=3.0,
+                    help="Student-t df; 30+ is Gaussian")
     ap.add_argument("--valence-scale", type=float, default=0.002,
                     help="valence at which the drive to act saturates")
     ap.add_argument("--trained", default="output/odor_trained.flyckpt")

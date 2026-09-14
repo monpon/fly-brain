@@ -297,6 +297,19 @@ inputs has the memory and no interface to it.
 Nothing temporal can be held yet, because `forward` applies the same input at
 every timestep. See [docs/FINDINGS.md](docs/FINDINGS.md).
 
+## Playing pong against it
+
+```bash
+.venv/bin/python scripts/pong.py
+```
+
+You are the left paddle, the fly is the right one, and it is taught only by
+the dopamine rule -- reward on intercept, punishment on miss. It does not work
+yet: 19.6% against a chance rate of 18.9% over 500 balls. A rally is ~137
+decisions yielding one bit at the end, and the eligibility trace cannot reach
+back that far. The same machinery learns a single-decision task to 100%. See
+[docs/FINDINGS.md](docs/FINDINGS.md).
+
 ## Next steps
 
 1. Map `get_ommatidia_readouts()` (2 x 721 x 2) onto retinotopic T4/T5 input.

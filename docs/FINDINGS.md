@@ -773,3 +773,92 @@ Three odours taught by the dopamine rule, saved, loaded into a fresh brain:
 Not approximately -- `np.array_equal`. The format is a versioned zip holding
 a readable manifest plus body-id-keyed arrays, so `unzip -p f.flyckpt
 manifest.json` tells you what a checkpoint is without loading the connectome.
+
+## Teaching a fly by reward and punishment
+
+Gradient descent is gone from this path. `learning.py` is the trainer, and
+what follows was measured with it.
+
+### Variability belongs in the action, not the readout
+
+`learning.py` had no randomness, which looked like a missing feature and was
+not: the variability was already there, one layer down, in `navigate.py` and
+`olfactory_brain.py`. That is the right place. A fly's behavioural
+variability comes from premotor circuits, not from reading its memories
+badly, so the synaptic readout should stay deterministic.
+
+What was wrong was its shape. Fly spontaneous turning is heavy-tailed rather
+than Gaussian -- closer to a Levy walk, and actively generated. `noise_tail`
+is a Student-t degree of freedom, rescaled by `sqrt(df/(df-2))` so `noise`
+still means one standard deviation:
+
+| tail | sd | max excursion | P(abs(turn) > 0.10) |
+|---:|---:|---:|---:|
+| 3 | 0.0292 | 0.754 | 1.11% |
+| 5 | 0.0298 | 0.266 | 0.80% |
+| 30 (Gaussian) | 0.0301 | 0.142 | 0.095% |
+
+Same size, eleven times as many large excursions. The rescaling matters: the
+first version used df=2, whose variance is infinite, and would have silently
+tripled the noise everywhere.
+
+### Credit has to name the action, and the dopamine has to be gated
+
+Two separate things, both required.
+
+`learn` is classical -- it tags whatever the fly was *seeing*. That is right
+for "this odour predicts sugar" and wrong once behaviour earned the outcome,
+because exploration can make the action disagree with the valence that
+produced it. `learn_operant` binds reinforcement to `sign(action * outcome)`,
+so a noise-flipped action that succeeds reinforces the direction actually
+taken rather than the one the valence preferred.
+
+With several behavioural channels there is a second problem, and it is
+fatal. Dopamine floods a compartment; every MBON reading it is affected. So
+the synaptic update is identical whatever the fly chose, and no choice is
+learnable. Gating dopamine to the compartments read by the chosen channel
+fixes it -- which is what compartment specificity is for in the animal.
+
+Two stimuli, two output channels, one requiring each:
+
+    dopamine gated to the chosen channel : 100%
+    dopamine flooding all compartments   :  50%     (chance)
+
+`FlyBrain(mb, n_actions=k)` gives each action a disjoint slice of the MBON
+population. Disjoint is what makes them independently trainable: the plastic
+gains are shared, so overlapping readouts would move together and the fly
+could never prefer one action over another. Which MBON drives which action is
+not in the connectome; splitting in order is a placeholder for a behavioural
+mapping that would have to come from experiment.
+
+### Pong does not work, and the reason is instructive
+
+`scripts/pong.py` is a playable tkinter window. The fly is taught only by
+reward on intercept and punishment on miss. Over 500 balls:
+
+| balls | hit rate | depressed |
+|---:|---:|---:|
+| 50 | 24% | 10.7% |
+| 150 | 16% | 16.2% |
+| 250 | 22% | 18.6% |
+| 350 | 16% | 19.4% |
+| 500 | 24% | 20.5% |
+
+First five blocks 20.0%, last five 19.6%, chance 18.9%. No trend at all,
+while the depressed fraction doubles and plateaus -- the whole plastic budget
+spent on nothing.
+
+This is not a bug in the rule or in the signs, both of which were checked.
+The same two-channel machinery learns a single-decision task to 100%. The
+difference is that a rally is about 137 decisions and yields one bit at the
+end, attributed to the final frame. `trace_tau` is 2 *calls* against 137 per
+rally, so the eligibility trace cannot reach the decisions that placed the
+paddle.
+
+Temporal credit assignment is therefore the wall, and it is the same wall as
+the 66.7% looming ceiling and the unused motion detectors: this brain has no
+way to relate something that happened now to something it did earlier.
+
+Untested and plausible: dense per-frame reinforcement judged on whether a
+move closed the gap, and feeding a longer history of positions and
+velocities. Neither has been measured.

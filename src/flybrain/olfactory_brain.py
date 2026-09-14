@@ -63,7 +63,20 @@ class BrainNavParams:
     lost_level: float = 1e-4       # below this, assume no odour
     pn_gain: float = 30.0          # concentration -> projection neuron rate
     valence_scale: float = 0.002   # valence at which the drive to act saturates
-    noise: float = 0.03
+    noise: float = 0.03            # scale of spontaneous turn variability
+    # Fly spontaneous turning is not Gaussian. Maye et al. (2007) found it
+    # heavy-tailed, closer to a Levy walk: mostly small jitter with occasional
+    # large excursions, and actively generated rather than suffered. That
+    # matters beyond realism -- heavy tails explore far better, because the
+    # animal sometimes tries something genuinely different instead of always
+    # nudging.
+    #
+    # Degrees of freedom for a Student-t, rescaled to keep the standard
+    # deviation at `noise` whatever the tail is, so this changes the *shape*
+    # of the variability and not its size. 3 is markedly heavy-tailed, 30+ is
+    # indistinguishable from Gaussian. Below 3 the variance is infinite and no
+    # rescaling is possible, which is why that is not the default.
+    noise_tail: float = 3.0
     # A sharp turn has to be a slow turn on this body: at 15 mm/s the turning
     # circle is ~23 mm across, wider than a corridor. Real flies also drop
     # their walking speed sharply during saccadic turns.
@@ -107,6 +120,27 @@ class BrainNavigator:
             for n, v in zip(self.odor_names, self.valences)
         )
 
+    def _wander(self) -> float:
+        """Spontaneous turn variability: heavy-tailed, not Gaussian.
+
+        Raise `noise` while training to explore, lower it to perform. This is
+        the only source of behavioural variability in the loop -- the synaptic
+        readout is deterministic, as it should be, because a fly's variability
+        comes from premotor circuits rather than from reading its memories
+        badly.
+        """
+        p = self.p
+        if p.noise <= 0.0:
+            return 0.0
+        df = p.noise_tail
+        if df >= 30.0:
+            return float(self.rng.normal(0.0, p.noise))
+        # A Student-t has variance df/(df-2); divide it out so `noise` keeps
+        # meaning one standard deviation. Undefined at df <= 2, where the
+        # variance is infinite and the draw is used unscaled.
+        scale = np.sqrt(df / (df - 2.0)) if df > 2.0 else 1.0
+        return float(self.rng.standard_t(df) / scale * p.noise)
+
     def update(self, samples, dt_ms: float) -> tuple[float, float]:
         """`samples` is (n_odours, 2): left and right concentration of each."""
         p = self.p
@@ -136,7 +170,7 @@ class BrainNavigator:
         # and a positive one to flee it. One equation, both behaviours.
         appetitive = np.tanh(self.valences / max(p.valence_scale, 1e-9))
         turn = -p.turn_gain * float(appetitive @ bilateral)
-        turn += self.rng.normal(0.0, p.noise)
+        turn += self._wander()
 
         share = (left + right) / total
         self.valence = float(appetitive @ share)

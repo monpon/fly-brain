@@ -101,9 +101,14 @@ class FlyBrain:
         mb: MushroomBody,
         params: LearningParams | None = None,
         state: TrainedState | None = None,
+        n_actions: int = 1,
     ) -> None:
         self.mb = mb
         self.params = params or LearningParams()
+        # 1 keeps the scalar approach/avoid readout every other caller uses.
+        # More than 1 gives separate behavioural channels -- see
+        # `action_readout` for why they must read disjoint MBONs.
+        self.n_actions = int(n_actions)
 
         pre_idx, post_idx, pre_body, post_body = mb.plastic_edges()
         self.pre_idx = pre_idx
@@ -148,11 +153,81 @@ class FlyBrain:
 
     def fresh_state(self) -> TrainedState:
         """An untrained fly: every synapse at full anatomical strength."""
+        n = getattr(self, "n_actions", 1)
+        readout = (self.default_readout() if n == 1
+                   else self.action_readout(n))
         return TrainedState(
             gain=np.ones(len(self.pre_idx), dtype=np.float32),
-            readout=self.default_readout(),
+            readout=readout,
             trials=0,
         )
+
+    def action_readout(self, n_actions: int) -> np.ndarray:
+        """One readout column per action, over disjoint MBON groups.
+
+        The scalar `default_readout` gives approach/avoid, which is a two-way
+        choice only through its sign. Real behavioural channels are separate
+        populations: different MBONs drive different actions. So each action
+        gets its own slice of the MBON population, and its drive is that
+        slice's rates against the default valence weighting.
+
+        Disjoint is what makes the channels independently trainable -- the
+        plastic gains are shared, so overlapping readouts would move together
+        and the fly could never prefer one action over another.
+
+        Which MBON drives which action is not in the connectome. Splitting the
+        population in order is a placeholder for a behavioural mapping that
+        would have to come from experiment.
+        """
+        base = self.default_readout()
+        out = np.zeros((len(base), n_actions), dtype=np.float32)
+        groups = np.array_split(np.arange(len(base)), n_actions)
+        for k, idx in enumerate(groups):
+            out[idx, k] = base[idx]
+        return out
+
+    def drives(self, pn: np.ndarray) -> np.ndarray:
+        """Per-action drive for a stimulus. Length `n_actions`."""
+        mbon = self.mbon_rates(self.kenyon_cells(pn))
+        r = self.state.readout
+        return (mbon @ r) if r.ndim == 2 else np.array([self.valence(mbon)],
+                                                       dtype=np.float32)
+
+    def choose(self, pn: np.ndarray, *, explore: float = 0.0, rng=None,
+               tail: float = 3.0) -> tuple[int, np.ndarray]:
+        """Pick an action. Returns (index, the drives it chose between).
+
+        Exploration is heavy-tailed and scaled to the spread of the drives, so
+        it stays meaningful whatever magnitude the readout happens to produce.
+        """
+        d = self.drives(pn)
+        if explore > 0.0 and len(d) > 1:
+            rng = rng if rng is not None else np.random.default_rng()
+            scale = np.sqrt(tail / (tail - 2.0)) if tail > 2.0 else 1.0
+            spread = float(np.ptp(d)) or float(np.abs(d).mean()) or 1e-6
+            d = d + rng.standard_t(tail, size=len(d)) / scale * explore * spread
+        return int(np.argmax(d)), d
+
+    def reinforce(self, pn: np.ndarray, action: int, outcome: float,
+                  *, strength: float = 1.0) -> dict[str, float]:
+        """Reward or punish the action that was actually taken.
+
+        Dopamine is not action-specific -- it floods a compartment, and every
+        MBON reading that compartment is affected. What makes this train a
+        *choice* is that each action reads a disjoint MBON group, so the same
+        dopamine moves the chosen channel's drive without dragging the others
+        with it.
+        """
+        magnitude = min(abs(float(outcome)), 1.0) * strength
+        if magnitude <= 0.0:
+            return self.learn(pn, update=False)
+        r = self.state.readout
+        mask = None
+        if r.ndim == 2:
+            mask = (r[:, int(action)] != 0).astype(np.float32)
+        if outcome > 0:
+            return self.learn(pn, reward=magnitude, mbon_mask=mask)
+        return self.learn(pn, punishment=magnitude, mbon_mask=mask)
 
     def default_readout(self) -> np.ndarray:
         """Map MBON rates to a behavioural valence.
@@ -212,8 +287,16 @@ class FlyBrain:
         return np.maximum(dan.astype(np.float32), 0.0) @ self.w_dan_mbon
 
     def valence(self, mbon: np.ndarray) -> float:
-        """Scalar approach(+)/avoid(-) drive. Positive means approach."""
-        return float(mbon @ self.state.readout)
+        """Scalar approach(+)/avoid(-) drive. Positive means approach.
+
+        With several action channels there is no single valence, so this
+        reports the net across them -- enough for logging and for the
+        diagnostics `learn` returns, but `drives` is what selects an action.
+        """
+        r = self.state.readout
+        if r.ndim == 2:
+            return float((mbon @ r).sum())
+        return float(mbon @ r)
 
     def respond(self, pn: np.ndarray) -> float:
         """Present an odour, read the behavioural valence. No learning."""
@@ -243,6 +326,7 @@ class FlyBrain:
         reward: float = 0.0,
         punishment: float = 0.0,
         update: bool = True,
+        mbon_mask: np.ndarray | None = None,
     ) -> dict[str, float]:
         """One conditioning trial: present an odour with reinforcement.
 
@@ -267,6 +351,14 @@ class FlyBrain:
             return out
 
         da = self.dopamine(self.dan_activity(reward=reward, punishment=punishment))
+        # Dopamine is compartment-specific in the animal: a DAN floods the
+        # compartment it innervates and no other. `mbon_mask` restricts it
+        # further, to the compartments read by one behavioural channel, which
+        # is what makes an update depend on the action that was taken. Without
+        # it every action produces the same synaptic change and no choice can
+        # ever be learned.
+        if mbon_mask is not None:
+            da = da * np.asarray(mbon_mask, dtype=np.float32)
 
         # The rule. Multiplicative, so a synapse approaches the floor
         # asymptotically instead of crossing it.
@@ -281,6 +373,68 @@ class FlyBrain:
         out["dopamine"] = float(da.sum())
         out["mean_gain"] = float(self.state.gain.mean())
         return out
+
+    def act(self, pn: np.ndarray, *, explore: float = 0.0,
+            rng=None, tail: float = 3.0) -> float:
+        """Choose an action from a stimulus. Returns a signed drive.
+
+        The readout is deterministic -- a fly's behavioural variability comes
+        from premotor circuits, not from reading its memories badly -- so the
+        variability is added here, at action selection.
+
+        `explore` is in units of the valence itself, so it scales with
+        whatever the readout happens to produce. Heavy-tailed for the reason
+        in `olfactory_brain.BrainNavParams`: occasional large excursions
+        explore far better than jitter of the same size.
+        """
+        valence = self.respond(pn)
+        if explore <= 0.0:
+            return valence
+        rng = rng if rng is not None else np.random.default_rng()
+        scale = np.sqrt(tail / (tail - 2.0)) if tail > 2.0 else 1.0
+        kick = float(rng.standard_t(tail) / scale)
+        return valence + kick * explore * max(abs(valence), 1e-6)
+
+    def learn_operant(
+        self,
+        pn: np.ndarray,
+        action: float,
+        outcome: float,
+        *,
+        strength: float = 1.0,
+    ) -> dict[str, float]:
+        """Reinforce the action the fly actually took.
+
+        `learn` is classical: it tags whatever the fly was *seeing* when
+        reinforcement arrived. That is right for "this odour predicts sugar"
+        and wrong the moment behaviour is what earned the outcome, because
+        exploration can make the action disagree with the valence that
+        produced it. Reward such a trial as if the valence had chosen it and
+        you reinforce the direction the fly did *not* take -- exploration then
+        actively teaches the wrong thing.
+
+        Binding credit to the action is one sign:
+
+            action > 0, outcome > 0  -> push valence up   (reward, PAM)
+            action > 0, outcome < 0  -> push valence down (punish, PPL1)
+            action < 0, outcome > 0  -> push valence down (punish)
+            action < 0, outcome < 0  -> push valence up   (reward)
+
+        so the reinforcement is `sign(action * outcome)`, and depression-only
+        plasticity still moves it both ways because reward and punishment
+        depress opposite compartments.
+
+        `action` is the signed drive actually executed, `outcome` is positive
+        for success. Magnitudes scale the update, so a near-miss teaches less
+        than a clean hit.
+        """
+        drive = float(action) * float(outcome)
+        magnitude = min(abs(drive), 1.0) * strength
+        if magnitude <= 0.0:
+            return self.learn(pn, update=False)
+        if drive > 0:
+            return self.learn(pn, reward=magnitude)
+        return self.learn(pn, punishment=magnitude)
 
     # -- diagnostics ------------------------------------------------------
 
