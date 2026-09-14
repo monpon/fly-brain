@@ -109,3 +109,36 @@ by about that much.
 ```python
 thorax = [s.name for s in fly.get_bodysegs_order()].index("c_thorax")
 ```
+
+## Ubuntu's prebuilt NVIDIA module is pinned to one kernel
+
+`nvidia-smi` reported "couldn't communicate with the NVIDIA driver" with the
+full `-595` driver stack installed and the card visible on the PCI bus. The
+cause was not the driver: `linux-modules-nvidia-595-open-7.0.0-**14**-generic`
+was installed while the running kernel was **7.0.0-31**. Ubuntu ships
+precompiled kernel modules pinned to an exact kernel version, and `dkms` was
+not installed, so nothing rebuilt the module when the kernel was upgraded.
+
+```bash
+sudo apt install linux-modules-nvidia-595-open-$(uname -r) dkms
+sudo modprobe nvidia nvidia_uvm     # no reboot needed
+```
+
+Installing `dkms` is what stops it recurring on the next kernel bump.
+`nvidia_uvm` is the module CUDA needs; loading `nvidia` alone gets you
+`nvidia-smi` but not compute. A reboot is not required once the module exists
+for the running kernel, but the desktop session keeps the *old* userspace
+libraries mapped until you log out, which shows up as:
+
+    NVRM: API mismatch: the client 'gnome-shell' has the version 595.58.03,
+    NVRM: but this kernel module has the version 595.91.07
+
+Harmless for CUDA in a fresh process.
+
+## trainable.py crashed on CUDA, silently worked on CPU
+
+`fit()` moves `X` and `Y` to the device once, then passed those same tensors
+to `accuracy()`, which called `np.asarray()` on them. On CPU that is a no-op.
+On CUDA it raises `TypeError: can't convert cuda:0 device type tensor to
+numpy`. Fixed with a `BrainNet._tensor()` helper that passes through tensors
+already on the device; the three conversion sites now share it.

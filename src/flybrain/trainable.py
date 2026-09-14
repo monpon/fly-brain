@@ -248,6 +248,21 @@ class BrainNet:
     def parameters(self):
         return [self.log_gain, self.bias, self.in_gain]
 
+    def _tensor(self, a):
+        """Coerce to a float32 tensor on this net's device.
+
+        Accepts arrays *and* tensors that are already on the device: `fit`
+        moves X and Y to the GPU once and then hands those same tensors to
+        `accuracy`, and routing a CUDA tensor back through numpy raises
+        rather than copying.
+        """
+        import torch
+
+        if torch.is_tensor(a):
+            return a.to(device=self.device, dtype=torch.float32)
+        return torch.as_tensor(np.asarray(a, dtype=np.float32),
+                               device=self.device)
+
     def gains(self) -> np.ndarray:
         import torch
 
@@ -285,9 +300,7 @@ class BrainNet:
         import torch
 
         with torch.no_grad():
-            u = torch.as_tensor(np.asarray(X, dtype=np.float32),
-                                device=self.device)
-            return self.forward(u).cpu().numpy()
+            return self.forward(self._tensor(X)).cpu().numpy()
 
     # -- training ---------------------------------------------------------
 
@@ -305,8 +318,7 @@ class BrainNet:
         import torch
         import torch.nn.functional as F
 
-        X = torch.as_tensor(np.asarray(X, dtype=np.float32), device=self.device)
-        Y = torch.as_tensor(np.asarray(Y, dtype=np.float32), device=self.device)
+        X, Y = self._tensor(X), self._tensor(Y)
         opt = torch.optim.Adam(self.parameters(), lr=lr)
         n_trials = X.shape[0]
         history = []
@@ -348,12 +360,9 @@ class BrainNet:
         import torch
 
         with torch.no_grad():
-            X = torch.as_tensor(np.asarray(X, dtype=np.float32),
-                                device=self.device)
-            Y = torch.as_tensor(np.asarray(Y, dtype=np.float32),
-                                device=self.device)
-            out = self.forward(X)
-            return float((out.argmax(1) == Y.argmax(1)).float().mean())
+            out = self.forward(self._tensor(X))
+            return float((out.argmax(1) == self._tensor(Y).argmax(1))
+                         .float().mean())
 
     # -- persistence ------------------------------------------------------
 

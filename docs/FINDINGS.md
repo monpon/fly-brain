@@ -450,3 +450,44 @@ synapses on coincidence with reinforcement. This is an engineering tool for a
 different question: not "how does the fly learn" but "what is this wiring
 *capable* of". An unconstrained network of the same size would fit far more;
 the constraint is the point.
+
+## The GPU is worth 10x, including on the circuit I expected it not to help
+
+`BrainNet.forward` is a gather, a multiply and a scatter-add over the synapse
+list, repeated for each of `steps` timesteps:
+
+    contrib = r[:, pre] * w              # gather, (batch, n_synapses)
+    drive   = drive.index_add(1, post, contrib)
+
+That is memory-bandwidth bound, not compute bound, so a GPU should win. What
+it won by, measured at `steps=12`, `batch=32`, 200 trials, RTX 3050 Mobile
+(4 GB, sm_86) against an i7-11800H:
+
+| circuit | neurons | synapses | CPU s/epoch | GPU s/epoch | speedup | VRAM |
+|---|---:|---:|---:|---:|---:|---:|
+| mushroom body | 4,437 | 82,146 | 4.12 | 0.46 | 8.9x | 0.27 GiB |
+| LC+LPLC -> DN | 6,016 | 383,079 | 25.82 | 2.10 | 12.3x | 1.22 GiB |
+
+I predicted the mushroom body would see no gain, on the theory that kernel
+launch overhead dominates at that size. It got 8.9x. The twelve timesteps
+each dispatch only a handful of large kernels, so there is far less launch
+overhead than the neuron count suggests -- the batch dimension keeps every
+kernel wide.
+
+Training agrees across devices but is not bit-identical: the same six odours
+resolve to the same MBONs, with margins matching to about six significant
+figures (+10.3848 on CPU against +10.3847 on CUDA). `index_add` on CUDA
+accumulates with atomics in nondeterministic order, so float addition is not
+associative between runs -- expect agreement, not reproducibility to the last
+bit.
+
+VRAM, not speed, is the ceiling. Autograd retains every timestep, so memory
+goes as `steps x batch x synapses`. 1.22 GiB of the 3.61 available at the
+sizes above leaves roughly 3x headroom; past that, halve `--batch` before
+concluding the card is too small.
+
+Only this path is accelerated. Brian2 (`network.py`, `simulate_vnc.py`)
+generates C++ with no CUDA backend, and everything touching MuJoCo -- the
+gait tuner, the maze, foraging -- runs on the CPU physics engine that flygym
+uses. Moving those would mean porting to MJX, which is a rewrite rather than
+a flag.

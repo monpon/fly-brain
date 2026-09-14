@@ -100,8 +100,8 @@ controllers elsewhere.
 ### Setup
 
 ```bash
-python3.12 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+uv venv --python 3.12 .venv
+uv pip install -r requirements.txt
 
 cp .env.example .env          # paste a neuPrint token, set FLYBRAIN_DATA_DIR
 .venv/bin/python scripts/check_env.py      # confirms the token and the dataset
@@ -213,6 +213,17 @@ Any set of cell types can be the circuit:
 ```
 
 The wiring stays the fly's: no synapse is added, removed, or sign-flipped.
+
+Training runs on the GPU when one is available (`--device auto`, the default;
+force it either way with `--device cpu|cuda`). Measured on an RTX 3050 Mobile
+against an i7-11800H, that is **8.9x** on the mushroom body and **12.3x** on a
+383,079-synapse visual circuit, with results agreeing to ~6 significant
+figures on both devices. VRAM
+is the limit rather than speed -- autograd retains every timestep, so memory
+goes as `steps x batch x synapses`; halve `--batch` before assuming the card
+is too small. See [docs/FINDINGS.md](docs/FINDINGS.md) for the numbers and
+[docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) if `nvidia-smi` cannot find the
+driver.
 Training sets one non-negative gain per existing synapse. See
 `docs/FINDINGS.md` for what it learns and how well.
 

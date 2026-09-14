@@ -1,11 +1,12 @@
 # Python 3.12. Newer versions have no wheels for Brian2 / torch / MuJoCo.
 #
-#   python3.12 -m venv .venv
-#   .venv/bin/pip install -r requirements.txt
+#   uv venv --python 3.12 .venv
+#   uv pip install -r requirements.txt
 #
-# Versions are the ones this was developed and measured against. torch is
-# CPU-only on purpose: the RTX 3050 in this machine has no driver loaded, and
-# nothing here is large enough to need one.
+# This venv is built with uv and has no `pip` inside it -- `.venv/bin/pip`
+# will not exist. Use `uv pip`, or `python -m venv` if you want pip.
+#
+# Versions are the ones this was developed and measured against.
 
 # Connectome data
 neuprint-python==0.6.3
@@ -19,9 +20,11 @@ mujoco==3.9.0
 flygym==2.1.0
 
 # Learning and optimisation
-# The +cpu build comes from PyTorch's own index, not PyPI.
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.14.0+cpu
+# Plain PyPI, which ships the CUDA-enabled build on linux x86_64. Do not pin
+# the '+cpu' variant here: it contains no CUDA at all, so trainable.py falls
+# back to the CPU silently and you lose ~10x. Measured on an RTX 3050 Mobile,
+# 4 GB: 8.9x on the mushroom body, 12.3x on LC+LPLC -> DN.
+torch==2.14.0
 scipy==1.18.1
 cma==4.5.0
 
