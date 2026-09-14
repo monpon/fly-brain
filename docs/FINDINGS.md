@@ -491,3 +491,193 @@ generates C++ with no CUDA backend, and everything touching MuJoCo -- the
 gait tuner, the maze, foraging -- runs on the CPU physics engine that flygym
 uses. Moving those would mean porting to MJX, which is a rewrite rather than
 a flag.
+
+## Pixels into a measured retina
+
+`vision.py` maps an image onto the neurons that look at it. The male-CNS
+annotations give 1,771 optic-lobe neurons a hex column address
+(`assignedOlHex1`, `assignedOlHex2`) -- 892 columns on the right eye, 875 on
+the left -- so a receptor lattice can be built from the fly's own addressing
+rather than assumed.
+
+Transduction follows flyvis (Lappalainen et al., Nature 2024): a column's
+value is the mean of a 13x13 pixel square centred on it. No optics, no
+acceptance function, no temporal filter.
+
+**Two things this does differently.** flyvis assumes spatial homogeneity and
+tiles one local connectome across 721 synthetic receptors, because its source
+data resolved only a few columns. Here the lattice is measured and the output
+vector is indexed by real body IDs.
+
+And the lattice geometry is isotropic. flyvis lays receptors out as
+`y = d*(u + v/2), x = d*v`, which puts neighbours at d, 1.118d and 1.118d --
+not a regular hexagon. That is harmless when stimuli are generated in the
+same coordinates that sample them, but a photograph arrives skewed: a looming
+disc rendered as a tilted rounded rectangle. Using `y = d*sqrt(3)/2*u,
+x = d*(v + u/2)` puts all six neighbours at exactly d.
+
+**The two eyes share hex addresses.** A left-eye L1 and a right-eye L1 can
+both be at (5, 7). Keying the lookup on address alone silently maps one eye
+onto the other and reports 87% coverage of a population that is 50% on this
+side. `ColumnInput` filters on `somaSide`; `Binocular` composes the two and
+asserts the index sets are disjoint.
+
+### The photoreceptors are histaminergic, and that is a sign flip
+
+R1-R6 are histaminergic: 3,377 of 3,377 at cell-type level here. Histamine at
+the photoreceptor-to-lamina synapse is *inhibitory* -- it opens chloride
+channels -- so real L1 and L2 depolarize to light **decrements**. A dark
+object on a light field is what drives them.
+
+Injecting raw luminance into L1 therefore gets the polarity of the entire
+early visual system backwards, and the connectome cannot correct it here: **no
+photoreceptor in the volume carries a column address.** R1-R6, R7p, R7y, R8p
+and R8y all have zero, so there is no retinotopic way to inject into them and
+let the measured R-to-L sign do the work. `ColumnInput` applies the inversion
+by hand, `invert=True` by default.
+
+With the correct polarity, L1 and L2 depolarize to a dark field and **Tm1 and
+Tm2 follow them** -- which is the OFF pathway, reproduced from measured
+wiring rather than fitted.
+
+### What it learns
+
+Circuit: L1/L2/L3/L5/Mi1/Tm1/Tm2/Tm9 -> T4/T5, 27,786 neurons and 433,598
+synapses, 7,114 inputs of which 6,196 (87%) carry a column address.
+
+| task | chance | train | held out | inputs |
+|---|---:|---:|---:|---|
+| object position (left / centre / right) | 33% | 100% | 100% | L1 L2 **L3** L5 |
+| object position, balanced | 33% | 66.7% | **66.7%** | L1 L2 L5 |
+| looming vs receding vs static | 33% | 66.7% | **66.7%** | L1 L2 L5 |
+
+**The 100% is an artifact and the 66.7% is the real number.** L3 carries
+column addresses on the right eye only -- 892 columns there, zero on the left,
+though 880 L3 cells exist in the left lobe. Including it gives the model 36%
+more input channels on one side, so "the object is on the right" has a
+trivially unique signature that owes nothing to retinotopy. Dropping L3
+balances the eyes to within 2.4% and the score falls to 66.7%, flat from
+epoch 100 through 400. The confusion matrix shows exactly what is missing:
+
+        pred:  left  centre  right
+    left         8      0      0
+    centre       0      8      0
+    right        0      8      0     <- right is called centre, always
+
+Left is separated cleanly; right and centre are not separable at all. A
+lesson about the dataset rather than about the fly, and the reason
+`Binocular.summary()` now warns when the eyes are unbalanced and
+`unbalanced_types()` names the offenders.
+
+Under the wrong (raw-luminance) polarity the unbalanced task reached 91.7%
+train and 83.3% held out against 100% with the histamine sign flip -- but
+since that 100% is itself an L3 artifact, the polarity comparison is only
+suggestive, not a clean 17-point result.
+
+The looming result is the more informative one, and it is a limit rather
+than a score -- it lands on the ceiling exactly.
+
+Looming and receding are the *same frames in opposite order*, so a single
+frame cannot separate them. The best available strategy is to identify
+"static" perfectly (1/3 of trials) and guess between the other two (half of
+the remaining 2/3, so another 1/3): **2/3 = 66.7%**. Train and held-out both
+come in at 66.7%. The circuit extracts all the information a single frame
+contains and then stops.
+
+An earlier run reported 43% at 20 epochs, which was undertraining, not the
+limit. The limit is 66.7% and the network reaches it.
+
+The cell types that exist to compute motion have nothing to compute it from,
+because `BrainNet` takes one vector per trial. Sequence input -- injecting a
+different `u` at each timestep instead of holding one constant -- is what
+unlocks T4/T5 and the DNp01 looming test.
+
+## What it can remember
+
+Three different things get called memory. They behave nothing alike here.
+
+`scripts/remember.py` runs all three.
+
+### Synaptic: pattern to value
+
+The one that works. Learned per-synapse gains on KC->MBON, saved by
+`checkpoint.py`, and already load-bearing: it is what makes the fly walk
+toward vinegar and solve the maze.
+
+| patterns | clean cue | 10% noise | 30% noise |
+|---:|---:|---:|---:|
+| 6 | 100% | 100% | 100% |
+| 50 | 100% | 100% | 100% |
+| 97 | 100% | 100% | 94.8% |
+| 150 | 100% | 100% | 94.7% |
+| 250 | 100% | 100% | 77.6% |
+| 400 | 100% | 100% | 71.7% |
+
+Clean recall never breaks -- 400 patterns and no ceiling found. Recall from a
+*degraded* cue is the real limit, and it holds to about 150 patterns before
+the memories interfere. Since there are only 97 MBONs, beyond 97 patterns
+several must share an output: 400 remembered items sorted into 97 answers,
+not 400 distinct valences. A fly learns a handful of odours in its life, so
+the substrate is not what constrains the animal.
+
+### Synaptic memory of an image, and it persists
+
+Same mechanism, visual input. Train on four scenes, save, load into a network
+built fresh from the anatomy:
+
+    after training      :  75.0%
+    fresh net, no memory:   0.0%
+    memory restored     :  75.0%
+
+Zero to seventy-five on loading a file. The gains key to connectome body ids,
+so a checkpoint survives re-extracting the circuit.
+
+75% is a weak readout, not a weak memory: the outputs are individual Tm cells
+in neighbouring columns, so the classes nearly overlap. The right anatomy for
+visual memory is in the dataset and is not this -- **visual projection
+neurons make 8,041 synapses onto KCgamma-d**, the visual Kenyon cell class,
+with aMe12, aMe26, MeVP41 and LoVP42 the largest sources. Reading out at MBON
+would give 97 separated outputs. Reaching it needs the whole
+lamina->medulla->lobula->VPN->KC chain, which is past the dense-matrix limit
+in `build()`.
+
+### Activity: the heading ring
+
+EPG, PEN, PEG, Delta7 and ER -- 430 neurons, 48,503 synapses -- are a ring
+attractor, the fly's compass. Poke the EPG cells, remove the input, watch.
+
+| global gain | softplus | saturating |
+|---:|---|---|
+| 2.0 | decays | decays |
+| 4.0 | runaway | decays |
+| 8.0 | runaway | **persists** |
+
+**The nonlinearity was the whole problem, not the wiring.** `softplus` is
+unbounded, so there is no high state to settle into and the ring can only
+decay or explode -- the same silent-to-runaway transition this file already
+reports for the spiking model, reappearing in a completely different circuit.
+Bound the rate and the same anatomy holds its activity indefinitely with the
+stimulus gone. `BrainNet(rate="saturating")` does that.
+
+But it holds **one** state. Poking any subset of EPG cells settles to the
+same global pattern: 23 different pokes, one attractor, pairwise similarity
+1.00. That is a 1-bit flag, not a heading. A real ellipsoid body holds a
+localised bump because local excitation is precisely balanced against
+Delta7's global inhibition, and a uniform gain scale cannot produce that
+balance. The topology supports a bump; the anatomical gains do not implement
+one. Training would have to.
+
+### What is still impossible
+
+Nothing temporal. `forward` computes `inject` once and applies the same
+vector at every timestep, so the network stares at a frozen frame. The state
+`x` *does* carry across timesteps -- that leaky integrator is exactly the
+short-term memory a motion detector needs -- but it is never given anything
+changing to hold.
+
+This is one wall, and it is the same wall behind every remaining limitation:
+the 66.7% looming ceiling, T4/T5 having no motion to detect, predictive Pong,
+and a heading that updates as the fly turns. Two changes lift it: index the
+input per timestep, and make `tau` a learnable per-cell-type parameter, which
+is the delay line a Hassenstein-Reichardt correlator is built from and what
+flyvis learns as `tau_ti`.

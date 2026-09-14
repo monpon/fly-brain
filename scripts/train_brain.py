@@ -27,41 +27,6 @@ from flybrain import mushroom_body as MB, odors, trainable
 OUT = Path("output/trained_brain.npz")
 
 
-def pick_device(requested: str) -> str:
-    """Resolve 'auto' to cuda when it is actually usable, else cpu.
-
-    The forward pass is a gather, a multiply and a scatter-add over the
-    synapse list, which is memory-bandwidth bound rather than compute bound --
-    exactly the shape of problem a GPU wins on. But only for large circuits:
-    the mushroom body is small enough that kernel launch overhead eats the
-    gain, so 'auto' is not automatically the fast choice.
-
-    Memory is the limit, not speed: autograd keeps every timestep, so VRAM
-    goes as steps x batch x synapses. Halve --batch before giving up.
-    """
-    import torch
-
-    if requested == "cpu":
-        return "cpu"
-    if torch.cuda.is_available():
-        name = torch.cuda.get_device_name(0)
-        free, total = torch.cuda.mem_get_info()
-        print(f"device: cuda -- {name}, {free / 2**30:.1f} of "
-              f"{total / 2**30:.1f} GiB free")
-        return "cuda"
-    if requested == "cuda":
-        raise SystemExit(
-            "--device cuda, but torch.cuda.is_available() is False.\n"
-            f"  torch {torch.__version__}, built against CUDA "
-            f"{torch.version.cuda}\n"
-            "  A '+cpu' build has no CUDA at all -- reinstall from "
-            "https://download.pytorch.org/whl/cu124\n"
-            "  If the build is right, check `nvidia-smi` finds the driver."
-        )
-    print("device: cpu (no CUDA available)")
-    return "cpu"
-
-
 def make_task(a, circuit):
     """Returns (X, Y, labels). Targets are one-hot over the output neurons."""
     n_in, n_out = len(circuit.input_idx), len(circuit.output_idx)
@@ -116,7 +81,7 @@ def main(a):
     print(f"\ntask: {len(X)} patterns -> {Y.shape[1]} output neurons "
           f"({'your data' if a.data else a.task})")
 
-    device = pick_device(a.device)
+    device = trainable.pick_device(a.device)
     net = trainable.BrainNet(circuit, steps=a.steps, tau=a.tau, seed=a.seed,
                              device=device)
     before = net.accuracy(X, Y)

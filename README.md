@@ -227,6 +227,69 @@ driver.
 Training sets one non-negative gain per existing synapse. See
 `docs/FINDINGS.md` for what it learns and how well.
 
+## Seeing
+
+`vision.py` renders an image onto the retina the connectome actually
+describes: 892 hex columns on the right eye, 875 on the left, each a named
+cell with a body ID.
+
+```bash
+.venv/bin/python scripts/see.py                    # a looming disc
+.venv/bin/python scripts/see.py --stimulus drifting
+.venv/bin/python scripts/see.py --image photo.png  # your own picture
+```
+
+```python
+from flybrain import trainable as T, vision as V
+
+circuit = T.build(["L1", "L2", "L3", "L5", "T4.*", "T5.*"],
+                  ["L1", "L2", "L3", "L5"], ["T4.*", "T5.*"])
+eyes = V.Binocular(circuit)
+X = eyes(V.disc(eyes.frame_size(), radius_px=40))   # -> (n_inputs,)
+```
+
+Trained on object position with balanced inputs it reaches 66.7% on held-out
+positions against 33% chance -- it separates left cleanly but cannot tell
+centre from right. On looming versus receding versus static it also reaches
+66.7%, which there is the ceiling: those are the same frames in opposite
+order, so one frame can only identify the static case. `BrainNet` takes one
+vector per trial -- motion needs sequences.
+
+Watch the eye balance. `L3`, `C2` and `Tm4` carry column addresses on the
+right eye only, so including them hands the model a lateralisation cue that
+looks like retinotopy and is not. `Binocular.summary()` warns; see
+[docs/FINDINGS.md](docs/FINDINGS.md).
+
+To see what the wiring does with no training at all:
+
+```bash
+.venv/bin/python scripts/react.py --stimulus looming
+```
+
+Photoreceptors are histaminergic, so the lamina inverts: L1 and L2 depolarize
+to *darkness*. `vision.py` applies that sign flip, because no photoreceptor in
+this volume carries a column address to route it through. See
+[docs/FINDINGS.md](docs/FINDINGS.md).
+
+## Remembering
+
+```bash
+.venv/bin/python scripts/remember.py            # all three experiments
+.venv/bin/python scripts/remember.py capacity   # how many associations
+.venv/bin/python scripts/remember.py attractor  # does activity outlive input
+```
+
+Synaptic memory works and persists: train on images, `save()`, load into a
+network built fresh from the anatomy, and it recalls them. About 150
+associations survive a degraded cue; clean recall has no ceiling we found.
+
+Activity memory needs `BrainNet(rate="saturating")`. With unbounded rates the
+heading ring only decays or explodes; bounded, it holds its state with no
+input -- though only one state, not a heading.
+
+Nothing temporal can be held yet, because `forward` applies the same input at
+every timestep. See [docs/FINDINGS.md](docs/FINDINGS.md).
+
 ## Next steps
 
 1. Map `get_ommatidia_readouts()` (2 x 721 x 2) onto retinotopic T4/T5 input.

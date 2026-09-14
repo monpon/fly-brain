@@ -195,6 +195,41 @@ def from_mushroom_body(mb, *, budget: float = 1.0) -> Circuit:
     )
 
 
+def pick_device(requested: str) -> str:
+    """Resolve 'auto' to cuda when it is actually usable, else cpu.
+
+    The forward pass is a gather, a multiply and a scatter-add over the
+    synapse list, which is memory-bandwidth bound rather than compute bound --
+    exactly the shape of problem a GPU wins on. But only for large circuits:
+    the mushroom body is small enough that kernel launch overhead eats the
+    gain, so 'auto' is not automatically the fast choice.
+
+    Memory is the limit, not speed: autograd keeps every timestep, so VRAM
+    goes as steps x batch x synapses. Halve --batch before giving up.
+    """
+    import torch
+
+    if requested == "cpu":
+        return "cpu"
+    if torch.cuda.is_available():
+        name = torch.cuda.get_device_name(0)
+        free, total = torch.cuda.mem_get_info()
+        print(f"device: cuda -- {name}, {free / 2**30:.1f} of "
+              f"{total / 2**30:.1f} GiB free")
+        return "cuda"
+    if requested == "cuda":
+        raise SystemExit(
+            "--device cuda, but torch.cuda.is_available() is False.\n"
+            f"  torch {torch.__version__}, built against CUDA "
+            f"{torch.version.cuda}\n"
+            "  A '+cpu' build has no CUDA at all -- reinstall from "
+            "https://download.pytorch.org/whl/cu124\n"
+            "  If the build is right, check `nvidia-smi` finds the driver."
+        )
+    print("device: cpu (no CUDA available)")
+    return "cpu"
+
+
 # -- the trainable network ------------------------------------------------
 
 
@@ -214,13 +249,16 @@ class BrainNet:
     """
 
     def __init__(self, circuit: Circuit, *, steps: int = 12, tau: float = 2.0,
-                 dt: float = 1.0, seed: int = 0, device: str = "cpu"):
+                 dt: float = 1.0, seed: int = 0, device: str = "cpu",
+                 rate: str = "softplus", rmax: float = 5.0):
         import torch
 
         self.circuit = circuit
         self.steps = steps
         self.tau = tau
         self.dt = dt
+        self.rate_name = rate
+        self.rmax = rmax
         self.device = torch.device(device)
         torch.manual_seed(seed)
 
@@ -244,6 +282,27 @@ class BrainNet:
                                   requires_grad=True)
 
     # -- forward ----------------------------------------------------------
+
+    def rate(self, v):
+        """Voltage to firing rate.
+
+        `softplus` is unbounded, which is fine for feedforward mapping and
+        fatal for memory: with no ceiling there is no high state to settle
+        into, so a recurrent circuit can only decay or run away. Sweeping a
+        global gain on the EPG ring bears that out -- it decays at 2.5 and
+        explodes at 4.0, with no stable window between, the same silent-to-
+        runaway transition `docs/FINDINGS.md` reports for the spiking model.
+
+        `saturating` bounds the rate at `rmax`, as a real neuron is bounded.
+        The same ring then holds its activity indefinitely after the stimulus
+        is removed. Use it whenever the question involves persistence.
+        """
+        import torch
+        import torch.nn.functional as F
+
+        if self.rate_name == "saturating":
+            return self.rmax * torch.sigmoid(v)
+        return F.softplus(v)
 
     def parameters(self):
         return [self.log_gain, self.bias, self.in_gain]
@@ -281,7 +340,7 @@ class BrainNet:
         inject = inject.index_add(1, self.in_idx, u * self.in_gain)
 
         x = torch.zeros(batch, n, device=self.device)
-        r = F.softplus(x)
+        r = self.rate(x)
         history = []
         k = self.dt / self.tau
         for _ in range(self.steps):
@@ -289,12 +348,69 @@ class BrainNet:
             drive = torch.zeros(batch, n, device=self.device)
             drive = drive.index_add(1, self.post, contrib)
             x = x + k * (-x + drive + self.bias + inject)
-            r = F.softplus(x)
+            r = self.rate(x)
             if trace:
                 history.append(r[:, self.out_idx].detach().cpu().numpy())
 
         out = r[:, self.out_idx]
         return (out, np.asarray(history)) if trace else out
+
+    def response(self, u, *, keep: str = "all") -> np.ndarray:
+        """Every neuron's rate at every timestep, for one stimulus.
+
+        `forward` reports only the output population, which answers "what did
+        the circuit decide". This answers the prior question: what does the
+        wiring *do* when you show it something. No training is involved --
+        with gains at 1.0 the network is the anatomy, run forward.
+
+        Returns (steps, n_neurons), or (steps,) reduced if `keep` is "mean".
+        """
+        import torch
+        import torch.nn.functional as F
+
+        x = self._tensor(u)
+        if x.ndim == 1:
+            x = x[None]
+        with torch.no_grad():
+            n = self.circuit.n
+            w = self.w_anat * torch.exp(self.log_gain)
+            inject = torch.zeros(x.shape[0], n, device=self.device)
+            inject = inject.index_add(1, self.in_idx, x * self.in_gain)
+
+            v = torch.zeros(x.shape[0], n, device=self.device)
+            r = self.rate(v)
+            k = self.dt / self.tau
+            history = []
+            for _ in range(self.steps):
+                drive = torch.zeros(x.shape[0], n, device=self.device)
+                drive = drive.index_add(1, self.post, r[:, self.pre] * w)
+                v = v + k * (-v + drive + self.bias + inject)
+                r = self.rate(v)
+                history.append(r.mean(0).cpu().numpy() if keep == "all"
+                               else float(r.mean()))
+        return np.asarray(history)
+
+    def response_by_type(self, u, *, baseline=None, limit: int = 0):
+        """Per-cell-type response, strongest first.
+
+        `baseline` is an optional second stimulus to subtract, which is what
+        makes the number interpretable: the raw rate of a cell type mostly
+        reflects how many inputs it has, whereas the *change* between two
+        stimuli reflects what it is tuned to. Pass a blank field to get the
+        response to the stimulus rather than to light in general.
+        """
+        rates = self.response(u)[-1]
+        if baseline is not None:
+            rates = rates - self.response(baseline)[-1]
+
+        types = self.circuit.types.astype(str)
+        order = np.argsort(types)
+        names, starts = np.unique(types[order], return_index=True)
+        groups = np.split(order, starts[1:])
+        rows = [(str(nm), float(rates[g].mean()), int(len(g)))
+                for nm, g in zip(names, groups)]
+        rows.sort(key=lambda r: -abs(r[1]))
+        return rows[:limit] if limit else rows
 
     def predict(self, X) -> np.ndarray:
         import torch
