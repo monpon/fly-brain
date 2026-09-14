@@ -60,6 +60,14 @@ class LoadReport:
     dropped_from_checkpoint: int
     mean_gain_transferred: float
     trials: int
+    readout_actions: tuple[int, int] = (0, 0)
+    """(saved, target) behavioural channels. Unequal means the readout did
+    not transfer -- the gains still did, but the interface to them differs."""
+
+    @property
+    def readout_transferred(self) -> bool:
+        saved, target = self.readout_actions
+        return saved == target
 
     @property
     def coverage(self) -> float:
@@ -85,6 +93,13 @@ class LoadReport:
                 "synapse, discarded"
             )
         lines.append(f"  mean transferred gain {self.mean_gain_transferred:.4f}")
+        if not self.readout_transferred:
+            saved, target = self.readout_actions
+            lines.append(
+                f"  readout NOT transferred: saved fly had {saved} behavioural "
+                f"channels, this one has {target}. Gains loaded; the readout "
+                "is the target's own."
+            )
         if not self.fingerprint_match and self.mode == "body":
             lines.append(
                 "  NOTE: fingerprints differ -- this is a different extraction. "
@@ -216,6 +231,12 @@ def load(
     else:
         matched, dropped = _join_by_type(fly, saved, gain)
 
+    def _channels(readout) -> int:
+        readout = np.asarray(readout)
+        return int(readout.shape[1]) if readout.ndim == 2 else 1
+
+    channels = (_channels(saved["readout"]), _channels(fly.state.readout))
+
     fly.state = TrainedState(
         gain=gain,
         readout=_load_readout(fly, saved),
@@ -244,6 +265,7 @@ def load(
             float(transferred.mean()) if transferred.size else 1.0
         ),
         trials=int(manifest.get("trials", 0)),
+        readout_actions=channels,
     )
 
 
@@ -294,9 +316,33 @@ def _join_by_type(fly: FlyBrain, saved: dict, gain: np.ndarray) -> tuple[int, in
 
 
 def _load_readout(fly: FlyBrain, saved: dict) -> np.ndarray:
-    """Restore the MBON readout, joined on MBON body ID."""
-    readout = fly.default_readout()
-    lookup = dict(zip(saved["mbon_body"].tolist(), saved["readout"].tolist()))
+    """Restore the MBON readout, joined on MBON body ID.
+
+    The readout is 1-D for a valence fly and 2-D (MBON, action) for one with
+    behavioural channels. This used to start from `default_readout()`, which
+    is 1-D always, so loading any checkpoint saved by a multi-action fly --
+    every pong fly -- died with "setting an array element with a sequence".
+    The shape now comes from the file.
+
+    A checkpoint whose action count differs from the target's cannot be
+    joined: the columns mean different things, and quietly keeping the file's
+    shape would leave the fly with fewer drives than it has moves, silently
+    losing an action. That case keeps the target's own readout and is reported
+    by `LoadReport.readout_actions`.
+    """
+    stored = np.asarray(saved["readout"])
+    want = getattr(fly.state.readout, "ndim", 1) == 2 and fly.state.readout.shape[1]
+
+    if stored.ndim == 1:
+        readout = fly.default_readout()
+    elif want and stored.shape[1] == want:
+        readout = fly.action_readout(int(want))
+    else:
+        # Mismatched channel counts, or a 2-D file onto a valence fly.
+        return fly.state.readout.copy()
+
+    lookup = {int(b): stored[i]
+              for i, b in enumerate(saved["mbon_body"].tolist())}
     for i, body in enumerate(fly.mb.body_ids["MBON"]):
         value = lookup.get(int(body))
         if value is not None:

@@ -23,6 +23,8 @@ APPS = {
     "react": ("react", "show the fly something, read what its neurons do"),
     "remember": ("remember", "what the circuit can hold on to, and how long"),
     "pong": ("pong", "play pong against the dopamine rule"),
+    "train-pong": ("train_pong", "drill a fresh fly on intercepting, "
+                                 "reward and shock only"),
     "train-brain": ("train_brain", "train a circuit on input/output pairs"),
     "train-fly": ("train_fly", "condition an odour, save the checkpoint"),
     "teach-odor": ("teach_odor", "differential conditioning, good vs bad odour"),

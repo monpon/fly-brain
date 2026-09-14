@@ -64,6 +64,21 @@ class LearningParams:
     recovery: float = 0.002        # drift of gain back toward 1.0 per trial
     gain_floor: float = 0.05       # synapses are depressed, never abolished
 
+    # The eligibility trace is a running *sum* of KC activity, so its steady
+    # state scales with `trace_tau`: doubling the time constant roughly
+    # doubles the trace, and therefore the size of every depression step. The
+    # time constant and the learning rate are not independent knobs, which
+    # makes "lengthen the trace" impossible to test in isolation -- raise
+    # trace_tau far enough and every synapse hits gain_floor on the first
+    # reinforced trial, which reads as "a longer trace is worse" when what
+    # actually happened is a 50x learning rate.
+    #
+    # Normalising makes it a leaky average instead, so trace_tau changes only
+    # how far back the trace reaches. Off by default because every measured
+    # result in docs/FINDINGS.md was produced with the sum, and those numbers
+    # should keep meaning what they say.
+    trace_normalize: bool = False
+
     def __post_init__(self) -> None:
         if not 0.0 < self.kc_sparsity <= 1.0:
             raise ValueError("kc_sparsity must be in (0, 1]")
@@ -183,7 +198,22 @@ class FlyBrain:
         out = np.zeros((len(base), n_actions), dtype=np.float32)
         groups = np.array_split(np.arange(len(base)), n_actions)
         for k, idx in enumerate(groups):
-            out[idx, k] = base[idx]
+            column = base[idx]
+            # Centre it. `base` is punish-minus-reward and carries both signs,
+            # so an arbitrary contiguous slice of it has an arbitrary net sum
+            # -- and that sum is a constant offset on the channel's drive.
+            # Uncentred, the channel with the largest offset wins `argmax`
+            # almost regardless of the stimulus: measured 96.5% of decisions
+            # going to one action and 0% to another, with agreement against a
+            # tracking policy at 2.2% where chance is 33.3%. The policy was
+            # not noisy, it was constant, and no amount of plasticity fixed it
+            # because depression moves gains by a few percent while the offset
+            # is structural.
+            #
+            # Centred, a uniform MBON response scores zero on every channel,
+            # so the comparison is about which *pattern* of MBON activity a
+            # stimulus produces, which is the thing that carries information.
+            out[idx, k] = column - column.mean()
         return out
 
     def drives(self, pn: np.ndarray) -> np.ndarray:
@@ -194,19 +224,42 @@ class FlyBrain:
                                                        dtype=np.float32)
 
     def choose(self, pn: np.ndarray, *, explore: float = 0.0, rng=None,
-               tail: float = 3.0) -> tuple[int, np.ndarray]:
+               tail: float = 3.0, absolute: bool = False
+               ) -> tuple[int, np.ndarray]:
         """Pick an action. Returns (index, the drives it chose between).
 
-        Exploration is heavy-tailed and scaled to the spread of the drives, so
-        it stays meaningful whatever magnitude the readout happens to produce.
+        Exploration is heavy-tailed. By default it is scaled to the spread of
+        the drives, so it stays meaningful whatever magnitude the readout
+        happens to produce -- but that convenience has a sting. Scaling the
+        noise to the signal pins the signal-to-noise ratio at about
+        `1/explore` *forever*: as learning separates the drives the noise
+        grows in exact proportion, and the animal can never become decisive
+        no matter how much it has learned. At the pong default of explore=2.0
+        the noise is twice the entire spread of the drives, which is to say
+        the action is noise.
+
+        `absolute=True` drops the scaling. Noise is then a fixed magnitude
+        the learned drives can outgrow, so decisiveness becomes a consequence
+        of having learned something rather than a parameter.
         """
         d = self.drives(pn)
-        if explore > 0.0 and len(d) > 1:
-            rng = rng if rng is not None else np.random.default_rng()
-            scale = np.sqrt(tail / (tail - 2.0)) if tail > 2.0 else 1.0
-            spread = float(np.ptp(d)) or float(np.abs(d).mean()) or 1e-6
-            d = d + rng.standard_t(tail, size=len(d)) / scale * explore * spread
-        return int(np.argmax(d)), d
+        if explore <= 0.0 or len(d) < 2:
+            return int(np.argmax(d)), d
+
+        rng = rng if rng is not None else np.random.default_rng()
+        scale = np.sqrt(tail / (tail - 2.0)) if tail > 2.0 else 1.0
+        kick = rng.standard_t(tail, size=len(d)) / scale * explore
+        if not absolute:
+            kick = kick * (float(np.ptp(d)) or float(np.abs(d).mean()) or 1e-6)
+        # The drives returned are the *clean* ones. The caller wants to know
+        # what the policy thinks, not what the dice did to it -- otherwise
+        # "did exploration override the policy" is unanswerable, because the
+        # chosen action is the argmax of the noised vector by construction.
+        return int(np.argmax(d + kick)), d
+
+    def greedy(self, pn: np.ndarray) -> int:
+        """The action the policy would take with no exploration at all."""
+        return int(np.argmax(self.drives(pn)))
 
     def reinforce(self, pn: np.ndarray, action: int, outcome: float,
                   *, strength: float = 1.0) -> dict[str, float]:
@@ -253,6 +306,16 @@ class FlyBrain:
 
     def reset_state(self) -> None:
         self.state = self.fresh_state()
+        self._trace[:] = 0.0
+
+    def reset_trace(self) -> None:
+        """Forget what is currently tagged, keeping everything learned.
+
+        Eligibility is a claim about what just happened, so it should not
+        survive into an unrelated episode. Without this, credit for one pong
+        rally lands partly on the decisions of the one before it, and a
+        single-trial association is contaminated by the trial before that.
+        """
         self._trace[:] = 0.0
 
     # -- forward ----------------------------------------------------------
@@ -339,7 +402,9 @@ class FlyBrain:
         # Eligibility: KC activity persists past odour offset, so dopamine
         # arriving a few seconds later still finds the right synapses tagged.
         decay = float(np.exp(-1.0 / max(p.trace_tau, 1e-6)))
-        self._trace = self._trace * decay + kc
+        self._trace = (self._trace * decay + kc * (1.0 - decay)
+                       if p.trace_normalize
+                       else self._trace * decay + kc)
 
         mbon = self.mbon_rates(kc)
         out = {

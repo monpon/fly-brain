@@ -831,7 +831,7 @@ could never prefer one action over another. Which MBON drives which action is
 not in the connectome; splitting in order is a placeholder for a behavioural
 mapping that would have to come from experiment.
 
-### Pong does not work, and the reason is instructive
+### Pong did not work, and the reason was not the one I spent three experiments on
 
 `flybrain pong` is a playable tkinter window. The fly is taught only by
 reward on intercept and punishment on miss. Over 500 balls:
@@ -845,20 +845,167 @@ reward on intercept and punishment on miss. Over 500 balls:
 | 500 | 24% | 20.5% |
 
 First five blocks 20.0%, last five 19.6%, chance 18.9%. No trend at all,
-while the depressed fraction doubles and plateaus -- the whole plastic budget
-spent on nothing.
+while the depressed fraction doubles and plateaus.
 
-This is not a bug in the rule or in the signs, both of which were checked.
-The same two-channel machinery learns a single-decision task to 100%. The
-difference is that a rally is about 137 decisions and yields one bit at the
-end, attributed to the final frame. `trace_tau` is 2 *calls* against 137 per
-rally, so the eligibility trace cannot reach the decisions that placed the
-paddle.
+**The explanation below this line was wrong.** It is kept because the way it
+failed is the useful part. What was claimed:
 
-Temporal credit assignment is therefore the wall, and it is the same wall as
-the 66.7% looming ceiling and the unused motion detectors: this brain has no
-way to relate something that happened now to something it did earlier.
+> This is not a bug in the rule or in the signs, both of which were checked.
+> The difference is that a rally is about 137 decisions and yields one bit at
+> the end. `trace_tau` is 2 *calls* against 137 per rally, so the eligibility
+> trace cannot reach the decisions that placed the paddle. Temporal credit
+> assignment is therefore the wall.
 
-Untested and plausible: dense per-frame reinforcement judged on whether a
-move closed the gap, and feeding a longer history of positions and
-velocities. Neither has been measured.
+Three things were tested against that claim, and it did not survive.
+
+**The paddle could not hold position.** Two actions meant it moved every
+frame, up or down, with no way to stand still. Adding HOLD: 21.4% against
+21.0%, a fifth of a standard error. Not it.
+
+**The trace could not reach back.** Sweeping `trace_tau` from 2 to 300 frames
+-- 150x, from 32 ms to twice a whole rally -- with the trace normalised so
+tau does not also scale the learning rate:
+
+| trace_tau | 2 | 25 | 107 | 300 |
+|---|---:|---:|---:|---:|
+| hit rate | 20.6% | 21.9% | 20.4% | 21.2% |
+| depressed | 15.8% | 17.7% | 19.2% | 20.4% |
+
+Flat. The second row is the control that makes this a result rather than a
+null: the trace demonstrably reached further and tagged monotonically more
+synapses. The plasticity changed; the behaviour did not.
+
+**What was actually wrong.** `action_readout` sliced `default_readout`
+(`punish - reward`, which carries both signs) into contiguous groups, one per
+behavioural channel. An arbitrary slice of a signed vector has an arbitrary
+net sum, and that sum is a constant offset on the channel's drive. The
+channel with the largest offset won `argmax` regardless of the stimulus:
+
+| version | policy | paddle y (court 39-421) |
+|---|---|---|
+| 2 actions | UP **100.0%**, DOWN 0.0% | mean **53**, sd 33 |
+| 3 actions | HOLD **100.0%** | mean 131, sd 52 |
+
+The fly was not learning slowly, and it was not acting randomly. It was
+**parked** -- jammed against the top wall, moving only when exploration noise
+shoved it. Its hit rate was the geometric odds of a ball arriving in the
+96-pixel catch window of a stationary paddle in a 460-pixel court:
+**96/460 = 20.9%**. Every measurement across every condition -- 20.4, 20.6,
+21.0, 21.2, 21.4, 21.9 -- was that number. It was never a learning outcome,
+which is why nothing moved it, and why the "chance baseline" and the "trained
+fly" agreed so precisely. They were the same thing.
+
+Centring each channel so a flat MBON response scores zero everywhere, leaving
+only the *pattern* of activity to decide:
+
+| | before | after |
+|---|---:|---:|
+| agreement with a tracking rule, untrained | 2.2% | **57.6%** |
+| after 100 supervised single decisions | 4.2% | **97.2%** |
+| pong, untrained (centring alone) | ~21% | **68.7%** |
+| pong, 200 supervised trials + explore 0.05 | ~21% | **83.7%** |
+
+So a depression-only dopamine rule on unmodified connectome wiring plays a
+continuous sensorimotor task at 83.7% against a 20.9% floor, and what hid
+that for an entire research thread was one uncentred readout.
+
+Two smaller corrections fell out of the same work. Exploration defaulted to
+2.0 while being *scaled to the spread of the drives*, which pins the
+signal-to-noise ratio at 1/explore forever -- the animal cannot become
+decisive however much it learns. It is 0.05 now, and a little beats none
+(83.7% against 78.8% greedy). And the chance rate quoted for "agreement with
+tracking" was `1/n_actions` = 33.3%, which is wrong: HOLD is correct only
+~3% of the time, so any policy that moves both ways scores ~46% knowing
+nothing. The honest null is a shuffle of the pairing, and it turns the
+untrained result from +26 points into +11. Assumed baselines caused both the
+original error and its first correction.
+
+### Reward and punishment alone are enough, without any supervision
+
+`flybrain train-pong` drills a fresh fly on a ball machine: random serve
+angles, dopamine on an intercept, shock on a miss, and nothing else. No
+gradient, no correct answer, no warm-up. One ball is one episode and the
+eligibility trace is cleared between them, so credit cannot bleed across.
+
+The encoding is deliberately harder than `pong.py`'s. There the fly is handed
+`ball_y - paddle_y`, already subtracted, which gives away the answer. Here
+**ball position, ball velocity and paddle position** arrive as three place
+codes over disjoint thirds of the projection neurons, and the relation
+between them has to be found. Kenyon cells are the natural place for that:
+each samples a handful of PNs, so a cell that happens to sample "ball high"
+together with "paddle low" fires for exactly the conjunction that should
+drive an upward move.
+
+Over 1,500 balls, against a `--learning-rate 0` control running the identical
+exploration schedule with every gain frozen at 1.0:
+
+| | hit rate | 95% CI | toward | policy vs tracking | shuffle null |
+|---|---:|---:|---:|---:|---:|
+| random actions | 21.7% | 18.6-25.1 | 50.2% | 50.6% | 44.7% |
+| gains frozen | 19.0% | 17.1-21.1 | 31.1% | 49.5% | 46.9% |
+| learning | **30.6%** | 28.3-33.0 | 38.0% | **60.0%** | 45.0% |
+
+The intervals do not overlap with either control. Exploration anneals across
+all three runs, so the frozen-gain row is what makes the claim: identical
+schedule, every gain pinned at 1.0, and it does not move off the floor. The
+improvement is plasticity, not decreasing noise.
+
+Two things in that table are worth more than the headline.
+
+**The untrained fly is worse than a random one** -- 19.0% against 21.7%, and
+`toward` (the fraction of moves that go at the ball) is 31.1% against random's
+50.2%. Its action bias drags the paddle into a wall, which is worse than
+having no policy at all.
+
+**And the policy probe disagrees with behaviour.** Untrained, it scores 57.6%
+against a 46% null on uniformly sampled ball and paddle positions -- clearly
+above chance -- while moving *away* from the ball 69% of the time in actual
+play. A self-driven paddle does not visit uniformly sampled states; it visits
+the ones its own policy steers it into. Learning lifts `toward` from 31.1% to
+38.0% and never reaches 50%. Any future claim about this circuit should be
+made on closed-loop behaviour, not on a probe over a distribution the animal
+never experiences.
+
+That control existed because the first reading of this experiment was
+confounded and nearly published as a result. The lesson is the same one the
+readout bug taught: the number needs a baseline that was measured, not
+assumed.
+
+Two caveats worth keeping. 30.6% is a long way below the 83.7% a supervised
+warm-up reaches, so reward and punishment find a much worse policy than the
+same circuit can hold. And `toward` -- the fraction of moves that go at the
+ball during play -- sits at 38-41% throughout, *below* the 50% chance rate,
+even while the greedy policy probes above null. The policy is better on paper
+than in the loop it actually runs in, which suggests the states a self-driven
+paddle visits are not the states it was scored on.
+
+### What the model leaves on the table
+
+Only 5 of the 20 mushroom-body pathways in `male-cns:v1.0` are modelled at
+all. Counting synapses between the extracted PN/KC/APL/MBON/DAN populations:
+
+| pathway | synapses | modelled |
+|---|---:|---|
+| KC -> KC | 1,153,845 | no |
+| KC -> MBON | 463,640 | yes |
+| PN -> KC | 369,652 | yes |
+| KC -> DAN | 281,369 | no |
+| DAN -> KC | 223,045 | no |
+| KC -> APL / APL -> KC | 406,552 | yes |
+| DAN -> MBON | 39,616 | yes |
+| MBON -> MBON | 26,259 | no |
+| MBON -> DAN | 11,020 | no |
+
+The largest pathway in the mushroom body is not in the model. Neither is the
+DAN-KC loop, at half a million synapses across both directions -- which is
+where the plasticity actually lives in the animal, since dopamine acts
+presynaptically on KC terminals rather than on a per-(KC, MBON) gain.
+
+Three of these bear directly on the failures above. **MBON -> MBON** is
+lateral inhibition between behavioural channels, which is the fly's own
+version of the centring fix applied by hand here. **MBON -> DAN** closes the
+loop so dopamine can depend on what the circuit already predicts, which is
+the substrate for a baseline. And the rule itself is depression-only with a
+floor, so the plastic budget is finite and visibly spends itself -- real
+KC->MBON plasticity is bidirectional and timing-dependent, and potentiation
+would roughly double what can be learned.
