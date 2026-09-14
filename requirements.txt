@@ -1,0 +1,30 @@
+# Python 3.12. Newer versions have no wheels for Brian2 / torch / MuJoCo.
+#
+#   python3.12 -m venv .venv
+#   .venv/bin/pip install -r requirements.txt
+#
+# Versions are the ones this was developed and measured against. torch is
+# CPU-only on purpose: the RTX 3050 in this machine has no driver loaded, and
+# nothing here is large enough to need one.
+
+# Connectome data
+neuprint-python==0.6.3
+pyarrow==25.0.1
+pandas==3.0.5
+numpy==2.5.3
+
+# Biophysics and body
+brian2==2.10.1
+mujoco==3.9.0
+flygym==2.1.0
+
+# Learning and optimisation
+# The +cpu build comes from PyTorch's own index, not PyPI.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.14.0+cpu
+scipy==1.18.1
+cma==4.5.0
+
+# Plotting and rendering
+matplotlib==3.11.2
+pillow==12.3.0

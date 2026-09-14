@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# Scripts regenerate everything here: renders, logs, checkpoints, and the
+# exploratory gait variants. The tuned gait is the exception -- it is 1.4 KB
+# of text, costs ~10 min of CMA-ES to rebuild, and is loaded as a default by
+# forage.py and maze_forage.py.
+output/*
+!output/gait.json
