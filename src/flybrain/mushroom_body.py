@@ -84,11 +84,18 @@ class MushroomBody:
     # membership rather than as a synaptic drive.
     W_dan_mbon: np.ndarray
 
+    # Recurrence. Lateral interaction between output channels, and the
+    # feedback from output back onto the teaching signal.
+    W_mbon_mbon: np.ndarray = field(default_factory=lambda: np.zeros((0, 0),
+                                                                    np.float32))
+    W_mbon_dan: np.ndarray = field(default_factory=lambda: np.zeros((0, 0),
+                                                                   np.float32))
+
     # +1 reward (PAM), -1 punishment (PPL1), per DAN.
-    dan_valence: np.ndarray
+    dan_valence: np.ndarray = field(default_factory=lambda: np.array([]))
 
     # +1 excitatory, -1 inhibitory, per MBON, from predicted neurotransmitter.
-    mbon_sign: np.ndarray
+    mbon_sign: np.ndarray = field(default_factory=lambda: np.array([]))
 
     glomeruli: np.ndarray = field(default_factory=lambda: np.array([]))
 
@@ -219,6 +226,14 @@ def extract(dataset: str | None = None) -> MushroomBody:
         W_kc_apl=_matrix(block("KC", "APL"), index["KC"], index["APL"]),
         W_apl_kc=_matrix(block("APL", "KC"), index["APL"], index["KC"]),
         W_dan_mbon=_matrix(block("DAN", "MBON"), index["DAN"], index["MBON"]),
+        # Recurrence the earlier model left out. MBON -> MBON is 26,259
+        # synapses of lateral interaction between output channels; MBON -> DAN
+        # is 11,020 synapses closing the loop from what the circuit currently
+        # predicts back onto the teaching signal. Both are in the volume and
+        # neither was being used.
+        W_mbon_mbon=_matrix(block("MBON", "MBON"), index["MBON"],
+                            index["MBON"]),
+        W_mbon_dan=_matrix(block("MBON", "DAN"), index["MBON"], index["DAN"]),
         dan_valence=_dan_valence(type_names["DAN"]),
         mbon_sign=L._signs(pd.Series(body_ids["MBON"])),
         glomeruli=np.array(
@@ -246,6 +261,7 @@ def _dan_valence(dan_types: np.ndarray) -> np.ndarray:
 
 _MATRICES = (
     "W_pn_kc", "W_kc_mbon", "W_kc_apl", "W_apl_kc", "W_dan_mbon",
+    "W_mbon_mbon", "W_mbon_dan",
     "dan_valence", "mbon_sign",
 )
 
@@ -285,6 +301,17 @@ def load_cache(path=None) -> MushroomBody:
         save_cache(mb, path)
         return mb
     with np.load(path, allow_pickle=False) as data:
+        missing = [name for name in _MATRICES if name not in data]
+        if missing:
+            # A cache written before these pathways were extracted. Rebuilding
+            # is a couple of minutes and silently running without them would
+            # be worse -- the recurrence would simply be absent, and the model
+            # would quietly be the old one.
+            print(f"cached mushroom body predates {', '.join(missing)}; "
+                  "re-extracting", flush=True)
+            mb = extract()
+            save_cache(mb, path)
+            return mb
         return MushroomBody(
             dataset=str(data["dataset"]),
             body_ids={r: data[f"body_{r}"] for r in ROLES},

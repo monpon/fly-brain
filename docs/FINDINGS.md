@@ -909,6 +909,31 @@ So a depression-only dopamine rule on unmodified connectome wiring plays a
 continuous sensorimotor task at 83.7% against a 20.9% floor, and what hid
 that for an entire research thread was one uncentred readout.
 
+**And the claim this file made about sparse reward was part of the same
+mistake.** Re-measured after the fix, on the same encoding, 200 balls against
+a returner that never misses:
+
+| pong.py | hit rate | 95% CI |
+|---|---:|---:|
+| random actions | 22.5% | 17.3-28.8 |
+| sparse, one bit per rally | **92.0%** | 87.4-95.0 |
+| dense, per-frame | **100.0%** | 98.1-100.0 |
+
+Sparse reward was never the problem *here*. One bit per ~137 decisions is
+ample for this encoding, which hands the circuit `ball_y - paddle_y` already
+subtracted -- most of the task solved before the mushroom body sees it. Every
+"sparse reward cannot work" result in the sections above was measuring a
+paddle bolted to a wall.
+
+Where sparse reward genuinely fails is the harder encoding in
+`flybrain train-pong`, which supplies ball position and paddle position on
+separate channels and requires the circuit to find the relation itself. The
+numbers below are that task, and they stand.
+
+The distinction matters for how any of this is written up: the gap between
+sparse and dense feedback is not a constant property of the rule, it scales
+with how much work the sensory encoding has already done.
+
 Two smaller corrections fell out of the same work. Exploration defaulted to
 2.0 while being *scaled to the spread of the drives*, which pins the
 signal-to-noise ratio at 1/explore forever -- the animal cannot become
@@ -978,6 +1003,109 @@ ball during play -- sits at 38-41% throughout, *below* the 50% chance rate,
 even while the greedy policy probes above null. The policy is better on paper
 than in the loop it actually runs in, which suggests the states a self-driven
 paddle visits are not the states it was scored on.
+
+### Nothing moves the plateau
+
+Six further attempts, all measured against the same task and the same floor.
+Three change the plasticity, three change the curriculum:
+
+| change | hit rate | policy vs null |
+|---|---:|---:|
+| baseline, depression only | 28.8% | 59.6% / 45.8% |
+| + MBON->MBON lateral inhibition | 28.1% | -- |
+| + bidirectional (opponent) plasticity | 26.7% | -- |
+| + learnable output map | 22.6% | 25.8% / 15.6% |
+| shaping on serve distance | 23.6% | 56.2% / 45.9% |
+| shaping on paddle size and ball speed | 28.1% | 55.6% / 46.3% |
+| shaping on decision frequency (8 vs 134) | 28.0% | 57.3% / 46.6% |
+| *supervised, for reference* | *83.7%* | *97.2% / 48.6%* |
+
+Reward-driven learning lands 10-14 points above null in every condition. The
+last row is the same circuit, the same frozen readout, and about a hundred
+trials of a supervised signal.
+
+Two of those curricula failed for reasons worth recording separately, because
+both were mistakes in the experiment rather than results about the fly.
+
+**Serve distance was the wrong difficulty axis twice over.** Serving the ball
+30 px away gives seven frames, and a paddle moving 7 px per frame cannot
+cross 200 px in seven -- the "easy" rung was harder than the full task and no
+fly ever left it. Rebuilding it to serve near the paddle then correlated the
+two channels the fly is supposed to relate: measured at **0.85** on the
+easiest rung against **0.00** at evaluation. The easy rung was not a
+sub-problem of the hard one, it was a different problem, and what the fly
+learned there was wrong everywhere else -- which is why that version scored
+*below* the unshaped baseline.
+
+**Slowing the ball lengthens the flight.** The paddle-and-speed ladder gave
+the easiest rung 262 decisions per outcome against 157 at the full task, so
+the curriculum made credit assignment hardest exactly where it was meant to
+be easiest. Shaping decision frequency instead -- the fly commits to a
+direction for k frames, 16 down to 1, so an outcome is ~8 decisions away at
+the bottom rung -- fixes that cleanly and changes nothing: 28.0%.
+
+That last one matters most. Shortening the credit chain by 17x was the
+best remaining explanation for the plateau, and it did not move it.
+
+### What reward and punishment *can* teach: one decision, one outcome
+
+Everything above says what this circuit cannot be taught. That is only half an
+answer, and the other half turns out to be the more useful one.
+
+`flybrain teach` strips out everything pong made hard. One stimulus, one
+choice, one outcome, immediately -- no trajectory, no delay, nothing to assign
+credit across. Six real odours from `odors.py` (vinegar, geosmin, CO2, banana,
+almond, cVA -- published glomerular response maps, not random vectors) mapped
+onto three actions, taught by dopamine on a correct choice and shock on a
+wrong one:
+
+| trial | 100 | 200 | 300 | 400 | 500 | 600 |
+|---|---:|---:|---:|---:|---:|---:|
+| accuracy | 59.3% | 91.2% | 96.7% | 97.8% | 98.8% | 99.3% |
+
+Final, scored greedily on every stimulus with exploration off: **100.0%, on
+all 64 flies**, against a 33% chance rate. Not one fly below ceiling.
+
+Capacity degrades gracefully rather than collapsing. Arbitrary sparse
+patterns, three actions, 800 trials, 48 flies:
+
+| stimuli | 2 | 4 | 8 | 16 | 24 | 32 |
+|---|---:|---:|---:|---:|---:|---:|
+| accuracy | 99.0% | 93.2% | 82.8% | 80.2% | 75.4% | 68.0% |
+
+Still twice chance at 32 associations, from a depression-only rule on
+unmodified connectome wiring.
+
+### The teaching signal, not the circuit
+
+Put the two results side by side. Same wiring, same plasticity rule, same
+readout, same code:
+
+| teaching signal | result |
+|---|---|
+| one decision -> one outcome, immediate | **100%** |
+| 32 associations, immediate | 68% vs 33% chance |
+| ~134 decisions -> one scalar at the end | ~10 points above chance |
+
+The only thing that differs is the structure of the feedback. That is the
+finding, and it reframes every failure in the section above: bidirectional
+plasticity, lateral inhibition, a learnable output map, and four separate
+curricula were all attempts to fix the bottom row by changing the circuit.
+The circuit was never the limitation.
+
+What this says about the model is worth stating plainly. The dopamine rule is
+a *conditioning* mechanism and an excellent one -- stimulus to valence to
+action, reinforced immediately, dozens of associations held at ceiling. That
+is what a mushroom body does in the animal. It is not a reinforcement
+learning algorithm for sequential control: there is no value function, no
+baseline, no bootstrapping, and one scalar per episode across 134 decisions
+carries almost no information no matter how rich the plasticity underneath
+it is.
+
+The practical rule for training this fly follows directly: **make every
+decision its own trial.** Where a task can be decomposed into stimulus-action
+pairs with immediate feedback, it learns to ceiling. Where it cannot, it
+extracts a bounded amount and no mechanism tested here changes the bound.
 
 ### What the model leaves on the table
 

@@ -79,6 +79,67 @@ class LearningParams:
     # should keep meaning what they say.
     trace_normalize: bool = False
 
+    # -- lateral interaction between MBONs --------------------------------
+    # Strength of MBON -> MBON feedback, and how many damped iterations to
+    # settle it. 0 reproduces the purely feedforward model exactly.
+    lateral: float = 0.0
+    lateral_steps: int = 3
+
+    # -- bidirectional plasticity -----------------------------------------
+    # The rule is depression-only by default: gains start at 1.0, dopamine
+    # drives them down, and `gain_floor` stops them at 0.05. That gives the
+    # animal a *finite plastic budget* -- it can only ever subtract, and in
+    # the pong drill the depressed fraction climbs past 35% and keeps going,
+    # which is the budget visibly running out.
+    #
+    # `bidirectional` makes each outcome depress its own compartments and
+    # potentiate the *opposite valence's*, both against the same eligibility
+    # trace. Reward therefore restores what punishment previously spent, and
+    # the budget stops being one-way.
+    #
+    # Getting this wrong is instructive and was measured. The first attempt
+    # potentiated the *same* compartments the same dopamine had just
+    # depressed, which is not a second direction of learning -- it is an
+    # eraser. The depressed fraction fell from 32.7% to 0.9% and the drill
+    # dropped from 28.8% to 22.0%, barely above the geometric floor. A rule
+    # that writes and unwrites the same synapse in one step holds nothing.
+    bidirectional: bool = False
+    potentiation_rate: float = 0.0     # 0 means "same as learning_rate"
+    gain_ceiling: float = 1.0          # raise above 1.0 to allow strengthening
+
+    # The order-dependent rule, kept separate because it is real biology that
+    # this particular task cannot use. In the animal, dopamine *followed by*
+    # Kenyon cell activity potentiates -- which is how an odour arriving after
+    # shock offset becomes attractive (relief learning). Here the only
+    # stimulus after an outcome is the next ball, which has nothing to do with
+    # what earned it, so the pairing writes noise. Worth having for
+    # conditioning protocols where something meaningful follows the
+    # reinforcement.
+    reverse_pairing: bool = False
+    da_trace_tau: float = 8.0          # frames dopamine stays available
+
+    # -- a learnable output map -------------------------------------------
+    # Which MBON drives which action is not in the connectome, so the model
+    # assigns it: `np.array_split(arange(97), n_actions)`, contiguous groups
+    # in extraction order. That is not a behavioural mapping, it is an array
+    # index, and it is incoherent -- 17 MBON cell types end up split across
+    # more than one channel, so biologically identical neurons are assigned
+    # to opposing commands.
+    #
+    # Until now the fly could not do anything about that. `learn` writes only
+    # `state.gain`; the readout is built once and never touched, so the animal
+    # can change which Kenyon cells drive which MBONs but not which MBONs mean
+    # "up". It has to route information *into* a scrambled output map instead
+    # of fixing the map.
+    #
+    # `readout_rate` makes that map plastic under the same three-factor rule
+    # as everything else: MBON active, action taken, outcome good -> that MBON
+    # drives that action more. Reward-modulated Hebbian learning at the output
+    # synapse, which is ordinary biology. 0 keeps the frozen map, so the
+    # ablation is a flag away.
+    readout_rate: float = 0.0
+    readout_trace_tau: float = 0.0     # 0 follows trace_tau
+
     def __post_init__(self) -> None:
         if not 0.0 < self.kc_sparsity <= 1.0:
             raise ValueError("kc_sparsity must be in (0, 1]")
@@ -144,6 +205,12 @@ class FlyBrain:
         )
         self.w_anat = (w * scale[post_idx]).astype(np.float32)
 
+        # MBON -> MBON, signed by the *presynaptic* MBON's transmitter, which
+        # is how real neurons work: a cell releases the same thing at all its
+        # terminals. Normalised per postsynaptic cell so the recurrent input
+        # is comparable to the feedforward drive rather than swamping it.
+        self.w_mbon_mbon = self._recurrent(getattr(mb, "W_mbon_mbon", None))
+
         # PN -> KC drive, likewise normalised per Kenyon cell.
         pn_kc = mb.W_pn_kc.astype(np.float64)
         kc_in = pn_kc.sum(axis=0)
@@ -163,6 +230,19 @@ class FlyBrain:
 
         self.state = state or self.fresh_state()
         self._trace = np.zeros(self.n_kc, dtype=np.float32)
+        # Lingering dopamine per compartment, for the reverse pairing.
+        self._da_trace = np.zeros(self.n_mbon, dtype=np.float32)
+        # MBON activity eligibility, for learning the output map. The rule
+        # needs to know which output cells were active when the action was
+        # chosen, which is a different quantity from which Kenyon cells were.
+        self._mbon_trace = np.zeros(self.n_mbon, dtype=np.float32)
+        # Each channel's initial total drive, so learning can redistribute
+        # weight within a channel without changing how loud that channel is
+        # relative to the others. Channels that drift apart in scale are the
+        # bug that parked the paddle against a wall.
+        r = self.state.readout
+        self._readout_norm = (np.abs(r).sum(axis=0) if r.ndim == 2
+                              else np.array([np.abs(r).sum()]))
 
     # -- initial state ----------------------------------------------------
 
@@ -277,10 +357,71 @@ class FlyBrain:
         r = self.state.readout
         mask = None
         if r.ndim == 2:
-            mask = (r[:, int(action)] != 0).astype(np.float32)
+            column = r[:, int(action)]
+            if self.params.readout_rate > 0.0:
+                # A learned output map goes dense -- every MBON acquires some
+                # weight on every action, which is the point, since that is
+                # how the fly reassigns a cell from one command to another.
+                # But the dopamine mask was binary, `readout != 0`, so the
+                # moment the map densifies the mask covers all 97 compartments
+                # and dopamine floods the lot. Measured: support went 33 -> 97
+                # within 150 balls. Global dopamine makes the update identical
+                # whatever the fly did, and no choice is learnable -- 50%
+                # against 100% on the single-decision task.
+                #
+                # Graded instead of binary. A compartment receives dopamine in
+                # proportion to how much it actually drives the chosen action,
+                # which keeps the update action-specific however dense the map
+                # becomes, and is closer to the biology than a hard set
+                # membership was.
+                peak = float(np.abs(column).max())
+                mask = (np.abs(column) / peak).astype(np.float32) if peak > 0 \
+                    else np.zeros_like(column, dtype=np.float32)
+            else:
+                mask = (column != 0).astype(np.float32)
         if outcome > 0:
-            return self.learn(pn, reward=magnitude, mbon_mask=mask)
-        return self.learn(pn, punishment=magnitude, mbon_mask=mask)
+            result = self.learn(pn, reward=magnitude, mbon_mask=mask)
+        else:
+            result = self.learn(pn, punishment=magnitude, mbon_mask=mask)
+
+        if self.params.readout_rate > 0.0:
+            self.learn_readout(int(action), 1.0 if outcome > 0 else -1.0,
+                               strength=magnitude)
+        return result
+
+    def learn_readout(self, action: int, outcome: float, *,
+                      strength: float = 1.0) -> None:
+        """Teach the fly which output neurons to drive.
+
+        Three factors, the same shape as the rule at KC->MBON: an MBON was
+        active (`_mbon_trace`), an action was taken (`action`), and it went
+        well or badly (`outcome`). Coincide them and that MBON's contribution
+        to that action moves accordingly.
+
+        Two constraints keep this from destroying the thing it is fixing.
+
+        The column is re-centred after every update. A constant offset on a
+        channel is precisely the bug that pinned the paddle to a wall for the
+        whole of this project's history, and a freely drifting readout would
+        reintroduce it within a few dozen trials.
+
+        The column is renormalised to the total drive it started with, so
+        learning redistributes weight *within* a channel rather than making
+        one channel louder than the others. Without it the winning action
+        wins harder every time it wins, which is a positive feedback loop and
+        not a policy.
+        """
+        r = self.state.readout
+        if r.ndim != 2 or not (0 <= action < r.shape[1]):
+            return
+        column = r[:, action].astype(np.float32)
+        column = column + (self.params.readout_rate * outcome * strength
+                           * self._mbon_trace)
+        column -= column.mean()
+        total = float(np.abs(column).sum())
+        if total > 0:
+            column *= float(self._readout_norm[action]) / total
+        r[:, action] = column
 
     def default_readout(self) -> np.ndarray:
         """Map MBON rates to a behavioural valence.
@@ -304,9 +445,33 @@ class FlyBrain:
         scale = np.abs(readout).sum()
         return readout / scale if scale > 0 else readout
 
+    def _recurrent(self, W) -> np.ndarray | None:
+        """Sign and normalise an MBON -> MBON matrix, or None if absent.
+
+        Returns None rather than zeros when the matrix is missing, so a
+        mushroom body cached before these pathways were extracted keeps the
+        old feedforward behaviour instead of silently pretending the
+        recurrence is there and empty.
+        """
+        if W is None or np.size(W) == 0 or W.shape != (self.n_mbon,
+                                                       self.n_mbon):
+            return None
+        signs = np.asarray(self.mb.mbon_sign, dtype=np.float32)
+        if signs.size != self.n_mbon:
+            signs = np.ones(self.n_mbon, dtype=np.float32)
+
+        W = np.asarray(W, dtype=np.float64) * signs[:, np.newaxis]
+        np.fill_diagonal(W, 0.0)              # a cell does not inhibit itself
+        total = np.abs(W).sum(axis=0)
+        scale = np.divide(1.0, total, out=np.zeros_like(total),
+                          where=total > 0)
+        return (W * scale[np.newaxis, :]).astype(np.float32)
+
     def reset_state(self) -> None:
         self.state = self.fresh_state()
         self._trace[:] = 0.0
+        self._mbon_trace[:] = 0.0
+        self._da_trace[:] = 0.0
 
     def reset_trace(self) -> None:
         """Forget what is currently tagged, keeping everything learned.
@@ -315,8 +480,18 @@ class FlyBrain:
         survive into an unrelated episode. Without this, credit for one pong
         rally lands partly on the decisions of the one before it, and a
         single-trial association is contaminated by the trial before that.
+
+        The *dopamine* trace is deliberately left alone. It is not a claim
+        about the past, it is neuromodulator that has been released and has
+        not yet cleared, and it does not know where an episode boundary is.
+        Clearing it here would also make potentiation impossible in any task
+        that reinforces at the end of an episode: the dopamine would be wiped
+        in the same breath that deposited it, and the reverse pairing would
+        never have any Kenyon cell activity to meet. It decays on its own,
+        over `da_trace_tau` frames.
         """
         self._trace[:] = 0.0
+        self._mbon_trace[:] = 0.0
 
     # -- forward ----------------------------------------------------------
 
@@ -339,11 +514,38 @@ class FlyBrain:
         return out / peak if peak > 0 else out
 
     def mbon_rates(self, kc: np.ndarray) -> np.ndarray:
-        """MBON output, with learning applied."""
+        """MBON output, with learning applied, then lateral interaction.
+
+        The feedforward part is the KC drive each MBON collects. What follows
+        is 26,259 synapses of MBON -> MBON that the earlier model ignored.
+
+        They matter for a specific reason. When MBONs are split into disjoint
+        behavioural channels, each channel's drive floats on its own constant
+        offset, and whichever offset is largest wins the choice regardless of
+        the stimulus -- which is exactly the failure documented in
+        docs/FINDINGS.md, where the paddle parked against a wall. Centring the
+        readout by hand fixes it. Lateral inhibition fixes it the way the
+        animal does: channels suppress one another, so what survives is the
+        *contrast* between them rather than their absolute level.
+
+        Solved by a few damped iterations rather than a matrix inverse. The
+        loop is inhibition-dominated and converges quickly; the damping is
+        there because a strongly recurrent inhibitory network with no time
+        constant can oscillate between iterations.
+        """
         contrib = kc[self.pre_idx] * self.w_anat * self.state.gain
-        return np.bincount(
+        raw = np.bincount(
             self.post_idx, weights=contrib, minlength=self.n_mbon
         ).astype(np.float32)
+
+        if self.w_mbon_mbon is None or self.params.lateral <= 0.0:
+            return raw
+
+        rate = raw
+        for _ in range(self.params.lateral_steps):
+            fed = rate @ self.w_mbon_mbon
+            rate = np.maximum(raw + self.params.lateral * fed, 0.0)
+        return rate.astype(np.float32)
 
     def dopamine(self, dan: np.ndarray) -> np.ndarray:
         """Dopamine level per MBON compartment, from DAN activity."""
@@ -407,11 +609,33 @@ class FlyBrain:
                        else self._trace * decay + kc)
 
         mbon = self.mbon_rates(kc)
+        if p.readout_rate > 0.0:
+            # Same shape of eligibility as the Kenyon cells get, one layer
+            # further out: which output cells were active when the choice was
+            # made, still tagged when the outcome lands.
+            r_decay = float(np.exp(-1.0 / max(p.readout_trace_tau
+                                              or p.trace_tau, 1e-6)))
+            self._mbon_trace = self._mbon_trace * r_decay + mbon * (1 - r_decay)
+
         out = {
             "valence": self.valence(mbon),
             "mbon_total": float(mbon.sum()),
             "kc_active": int((kc > 0).sum()),
         }
+        if p.reverse_pairing:
+            # Kenyon cells active *now* against dopamine that arrived earlier
+            # and has not yet decayed. Runs on every call, not only reinforced
+            # ones: this direction needs the cells to fire *after* the
+            # dopamine, so it belongs with the frames that follow an outcome.
+            if self._da_trace.any():
+                rate = p.potentiation_rate or p.learning_rate
+                revived = kc[self.pre_idx] * self._da_trace[self.post_idx]
+                headroom = p.gain_ceiling - self.state.gain
+                self.state.gain += rate * revived * headroom
+                np.clip(self.state.gain, p.gain_floor,
+                        max(p.gain_ceiling, 1.0), out=self.state.gain)
+            self._da_trace *= float(np.exp(-1.0 / max(p.da_trace_tau, 1e-6)))
+
         if not update:
             return out
 
@@ -425,14 +649,46 @@ class FlyBrain:
         if mbon_mask is not None:
             da = da * np.asarray(mbon_mask, dtype=np.float32)
 
-        # The rule. Multiplicative, so a synapse approaches the floor
-        # asymptotically instead of crossing it.
+        # Depression. Multiplicative, so a synapse approaches the floor
+        # asymptotically instead of crossing it. `_trace` is Kenyon cell
+        # activity that happened *before* this dopamine, which is the forward
+        # pairing that depresses.
         coincidence = self._trace[self.pre_idx] * da[self.post_idx]
         self.state.gain -= p.learning_rate * coincidence * self.state.gain
 
+        if p.bidirectional:
+            # Opponent potentiation. The same eligibility trace -- the same
+            # stimulus that just earned the outcome -- but paired with the
+            # dopamine of the *opposite* valence, so a reward strengthens in
+            # the punishment compartments and a punishment strengthens in the
+            # reward ones.
+            #
+            # This is what makes the budget renewable instead of one-way.
+            # Depression alone can only subtract, and the drill spends it:
+            # 35% of synapses depressed and still climbing. Here a later
+            # reward can lift back what an earlier punishment pushed down, so
+            # the same synapse can be used again rather than being consumed.
+            # Crucially it does not touch the compartments this outcome just
+            # depressed, which is the difference between a second direction
+            # of learning and an eraser.
+            opponent = self.dopamine(self.dan_activity(
+                reward=punishment, punishment=reward))
+            if mbon_mask is not None:
+                opponent = opponent * np.asarray(mbon_mask, dtype=np.float32)
+            revived = self._trace[self.pre_idx] * opponent[self.post_idx]
+            rate = p.potentiation_rate or p.learning_rate
+            self.state.gain += rate * revived * (p.gain_ceiling
+                                                 - self.state.gain)
+
         # Forgetting: untouched synapses drift back toward baseline.
         self.state.gain += p.recovery * (1.0 - self.state.gain)
-        np.clip(self.state.gain, p.gain_floor, 1.0, out=self.state.gain)
+        np.clip(self.state.gain, p.gain_floor, max(p.gain_ceiling, 1.0),
+                out=self.state.gain)
+
+        if p.reverse_pairing:
+            # This event's dopamine joins the pool the next few frames of
+            # Kenyon cell activity will be potentiated against.
+            self._da_trace = self._da_trace + da
 
         self.state.trials += 1
         out["dopamine"] = float(da.sum())

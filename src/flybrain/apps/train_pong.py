@@ -58,6 +58,13 @@ class Fly:
             learning_rate=a.learning_rate,
             trace_tau=a.trace_tau,
             trace_normalize=True,
+            lateral=a.lateral,
+            bidirectional=a.bidirectional,
+            reverse_pairing=a.reverse_pairing,
+            readout_rate=a.readout_rate,
+            gain_ceiling=a.gain_ceiling,
+            potentiation_rate=a.potentiation_rate,
+            da_trace_tau=a.da_trace_tau,
         ))
         self.n_pn = self.mb.n("PN")
         self.rng = np.random.default_rng(a.seed)
@@ -258,6 +265,23 @@ if __name__ == "__main__":
     ap.add_argument("--pn-gain", type=float, default=30.0)
     ap.add_argument("--fly-speed", type=float, default=7.0)
     ap.add_argument("--ball-speed", type=float, default=5.0)
+    # -- plasticity mechanisms, all off by default so the baseline stands --
+    ap.add_argument("--lateral", type=float, default=0.0,
+                    help="MBON->MBON lateral interaction strength (0 = off)")
+    ap.add_argument("--bidirectional", action="store_true",
+                    help="allow potentiation as well as depression")
+    ap.add_argument("--gain-ceiling", type=float, default=1.0,
+                    help="how far above anatomy a synapse may be potentiated")
+    ap.add_argument("--potentiation-rate", type=float, default=0.0,
+                    help="0 uses --learning-rate")
+    ap.add_argument("--readout-rate", type=float, default=0.0,
+                    help="learn which MBONs drive which action (0 = frozen, "
+                         "the arbitrary index-order split)")
+    ap.add_argument("--reverse-pairing", action="store_true",
+                    help="order-dependent potentiation (relief learning); "
+                         "writes noise in a task with no post-outcome cue")
+    ap.add_argument("--da-trace-tau", type=float, default=8.0,
+                    help="frames dopamine stays available to potentiate")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save", default=None)
     sys.exit(main(ap.parse_args()) or 0)

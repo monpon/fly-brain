@@ -6,69 +6,62 @@ It is taught only by the dopamine rule: reward when it intercepts, punishment
 when it misses. No gradients, no labels, no target action -- just "that went
 well" and "that did not".
 
-It does not work yet, and the window is honest about that. At 1,000 balls
-against a returner that never misses:
+It works, and how it got there is the interesting part.
 
-    actions              hit rate    95% CI       chance    delta
-    2  (UP/DOWN)         21.0%       18.6-23.6    20.0%     +1.0
-    3  (UP/HOLD/DOWN)    21.4%       19.0-24.0    21.0%     +0.4
-
-Both sit on their own chance baseline, neither trends across blocks, and the
-depressed-synapse fraction plateaus near 22% either way -- the fly spends its
-whole plastic budget and learns nothing.
-
-The fly makes about 107 decisions per rally and receives one bit at the end
-of it. The same two-channel setup learns a single-decision task to 100% (see
-docs/FINDINGS.md), so the machinery works and something about spanning time
-does not.
-
-Two candidate explanations have now been tested and neither survives.
-
-**Not the paddle's inability to hold position.** It could only ever move, up
-or down, every frame. `--actions 3` gives it a HOLD and buys 0.4 points, a
-fifth of a standard error. Worth knowing, because "it cannot stand still" is
-the first thing anyone notices watching it play.
-
-**Not the length of the eligibility trace**, which was the obvious suspect
-and the one this file used to assert. Sweeping `--trace-tau` from 2 to 300
-frames with `--trace-normalize` -- 150x, from 32 ms to well past a whole
-rally -- moves the hit rate not at all:
-
-    trace_tau      2      25     107     300     (chance 21.0)
-    hit rate    20.6    21.9    20.4    21.2
-    depressed   15.8    17.7    19.2    20.4
-
-The last row is the control that makes this a result rather than a null: the
-trace demonstrably reaches further back and tags monotonically more synapses.
-The plasticity changes. The behaviour does not.
-
-So a trace that spans the rally is necessary and nowhere near sufficient.
-The likely reason is that it credits all ~107 decisions roughly equally, and
-half of them were wrong even in a rally that was won -- lengthening the trace
-turns no signal into a very noisy one rather than into a useful one. There is
-no baseline, nothing that encodes "better than expected", so the variance is
-redistributed rather than reduced.
-
-Note also that `_trace` is never cleared between balls here, so credit bleeds
-across the serve at any tau. That is worth fixing before trusting a future
-sweep, though it cannot explain a flat result at tau=2.
-
-The experiment that would bisect what is left: dense per-frame reinforcement,
-judging each move by whether it closed the gap. That removes the temporal
-problem entirely rather than trying to reach across it. If the fly learns,
-credit assignment really was the whole story and the question becomes how to
-get that signal from something the animal could plausibly have. If it still
-does not learn, the problem was never temporal -- it is that a sparse KC code
-over two positional bumps cannot express the policy, or that the arbitrary
-MBON-to-action split cannot read it out -- and no amount of better credit
-will help.
-
-    flybrain pong
-    flybrain pong --load output/pong.flyckpt   # a taught fly
-    flybrain pong --explore 0 --load output/pong.flyckpt
-    flybrain pong --actions 2                  # no HOLD, the original
+    flybrain pong --drill 90        # dense reinforcement first, then play
+    flybrain pong                   # sparse reward only: near chance
+    flybrain pong --no-brain        # hide the live circuit panel
+    flybrain pong --actions 2       # the original two-channel version
 
 Press `s` to save the fly's memory, `r` to reset the score, `q` to quit.
+
+Measured against a returner that never misses, 200 balls, seed 1:
+
+    teaching signal                       hit rate
+    random actions                           22.5%
+    sparse: one bit per rally                92.0%
+    dense: was that move toward the ball    100.0%
+
+Sparse reward works *here*, and that is worth being precise about, because
+this file spent most of its history claiming the opposite. It was never a
+fact about sparse reward -- it was the parked-paddle bug below. With the
+readout fixed, one bit per rally is enough for this encoding.
+
+Where sparse reward genuinely fails is `flybrain train-pong`, which gives the
+fly ball position and paddle position on *separate* channels and makes it
+discover the relation. There the same rule plateaus at 28.8% against a 19.0%
+frozen-gain control, and stays there through MBON->MBON lateral inhibition,
+bidirectional plasticity, a learnable output map, and three curricula --
+while dense feedback reaches 74.1%. See docs/FINDINGS.md.
+
+So the contrast is not "dense beats sparse" flatly. How much the *structure*
+of the feedback matters depends on how much work the encoding has already
+done: this file hands over `ball_y - paddle_y` already subtracted, which is
+most of the problem solved before the circuit sees it.
+
+The bug underneath all of it
+----------------------------
+For most of this project's history the fly was not learning slowly, it was
+**parked**. `action_readout` sliced a signed vector into contiguous groups,
+one per action, and an arbitrary slice has an arbitrary net sum -- a constant
+offset per channel. The largest offset won `argmax` regardless of the
+stimulus: measured, two actions gave UP on 100.0% of frames and three gave
+HOLD on 100.0%. The paddle sat against a wall, and its hit rate was the
+geometric odds of a ball arriving in a stationary 96-pixel window, 20.9%.
+Every measurement was that constant, which is why nothing ever moved it.
+
+Centring each channel fixed it. Untrained agreement with a tracking rule went
+2.2% to 57.6%, and pong went ~21% to 68.7% with no training at all.
+
+What the fly ends up doing
+--------------------------
+Tracking, not prediction, and the numbers are blunt about it: the paddle sits
+6.1 px from where the ball *is* and 137.4 px from where it will *arrive*,
+with a lead fraction of -0.04. That is the correct strategy here -- the
+paddle moves 7 px per frame against a ball whose vertical speed tops out at
+4.25, so following always catches up. It also could not do otherwise: ball
+*x* is never supplied, so time-to-arrival is not derivable and the intercept
+is uncomputable from what it is given.
 
 Measuring it
 ------------
@@ -102,12 +95,19 @@ form conjunctions of their inputs and a conjunction of "here now" with "there
 before" is a motion detector. That is the same computation T4 and T5 perform
 in the optic lobe.
 
-Two channels come out. The mushroom body readout is one column per action
-over a disjoint group of MBONs, and reinforcement is gated to the chosen
-channel's compartments -- see `learning.action_readout`. Without that gating
-dopamine floods every compartment equally, the update does not depend on what
-the fly did, and no choice is learnable. Measured: 50% with global dopamine,
-100% with it gated.
+Three channels come out, one per action. The mushroom body readout gives each
+a disjoint group of MBONs, and reinforcement is gated to the chosen channel's
+compartments -- see `learning.action_readout`. Without that gating dopamine
+floods every compartment equally, the update does not depend on what the fly
+did, and no choice is learnable. Measured: 50% with global dopamine, 100%
+with it gated.
+
+Which MBON drives which action is *not* in the connectome. The split is
+`array_split(arange(97), 3)` -- extraction order -- and it is incoherent: 17
+MBON cell types land in more than one channel, so biologically identical
+neurons are assigned to opposing commands. It is a placeholder for a
+behavioural mapping that would have to come from experiment, and it is the
+least faithful part of this file.
 """
 
 import argparse
@@ -269,11 +269,16 @@ class Fly:
         move = self.moves[action] * self.speed
         self.y = float(np.clip(self.y + move, PAD_H / 2, H - PAD_H / 2))
 
-    def reinforce(self, outcome: float) -> None:
-        """+1 when it intercepted, -1 when it missed."""
+    def reinforce(self, outcome: float, *, learn: bool = True) -> None:
+        """+1 when it intercepted, -1 when it missed.
+
+        `learn=False` keeps the score but skips the synaptic update, for when
+        a denser signal is already doing the teaching.
+        """
         if self.last_pn is None:
             return
-        self.brain.reinforce(self.last_pn, self.last_action, outcome)
+        if learn:
+            self.brain.reinforce(self.last_pn, self.last_action, outcome)
         if outcome > 0:
             self.hits += 1
         else:
@@ -309,14 +314,67 @@ class Court:
         self.bx = W / 2
         self.by = float(self.rng.uniform(H * 0.25, H * 0.75))
         speed = self.a.ball_speed
-        angle = float(self.rng.uniform(-0.5, 0.5))
-        self.vx = direction * speed
-        self.vy = speed * np.sin(angle) * 1.6
+        # Decompose the speed rather than setting vx to it and adding vy on
+        # top: the old version served at up to 1.28x `ball_speed`, so the
+        # opening shot was faster than anything the paddles could return it
+        # at once rebounds started conserving speed.
+        angle = float(self.rng.uniform(-0.5, 0.5)) * 1.6
+        angle = float(np.clip(angle, -np.arcsin(self.MAX_STEEPNESS),
+                              np.arcsin(self.MAX_STEEPNESS)))
+        self.vx = direction * speed * float(np.cos(angle))
+        self.vy = speed * float(np.sin(angle))
 
-    def step(self, human_y: float) -> None:
+    # No steeper than this off a paddle, as a fraction of the ball's speed.
+    # Below it the ball would cross the court so slowly that a rally stops
+    # being a rally.
+    MAX_STEEPNESS = 0.85
+
+    def _rebound(self, paddle_y: float, direction: float) -> None:
+        """Send the ball back, with english, at a constant speed.
+
+        Where you hit the ball on the paddle sets the angle -- that is the
+        part worth keeping. What the old version also did was *add* to `vy`
+        without renormalising, so every hit made the ball faster: measured
+        over a long rally it reached 3.2x the serve speed and |vy| of 15.4
+        against a ball 18 px across. At that point it moves nearly its own
+        diameter per frame, the single bounce test per frame stops being
+        enough, and it jitters along the top and bottom walls -- 73 frames in
+        6,000 pinned against one. That reads as the window glitching, and it
+        is really the physics running away.
+
+        Speed is now conserved: english changes the direction only.
+        """
+        speed = float(np.hypot(self.vx, self.vy)) or self.a.ball_speed
+        vy = self.vy + (self.by - paddle_y) * 0.09
+        # Keep enough horizontal motion that the ball actually crosses.
+        vy = float(np.clip(vy, -self.MAX_STEEPNESS * speed,
+                           self.MAX_STEEPNESS * speed))
+        vx = direction * np.sqrt(max(speed ** 2 - vy ** 2, 1e-9))
+        self.vx, self.vy = float(vx), float(vy)
+
+    def step(self, human_y: float, *, dense: bool = False) -> None:
         """One frame: the fly decides, the ball moves, contacts are resolved."""
         self.human_y = human_y
+        gap_before = abs(self.by - self.fly.y)
         self.fly.step(self.by)
+
+        if dense:
+            # Every frame is its own trial: the move either closed the gap to
+            # the ball or opened it, and that is the outcome, immediately.
+            #
+            # This is what took the batched drill from 28% to 74%. Sparse
+            # reward -- one bit when the ball finally arrives, ~137 decisions
+            # later -- never beat 29% under six different plasticity
+            # mechanisms and four curricula. The circuit was never the limit;
+            # the feedback was.
+            #
+            # STAY does not move the paddle, so it earns nothing either way
+            # rather than being scored as a failure.
+            outcome = float(np.sign(gap_before - abs(self.by - self.fly.y)))
+            if outcome != 0.0 and self.fly.last_pn is not None:
+                self.fly.brain.reinforce(self.fly.last_pn,
+                                         self.fly.last_action, outcome)
+            self.fly.brain.reset_trace()
 
         self.bx += self.vx
         self.by += self.vy
@@ -327,12 +385,15 @@ class Court:
         # Fly's side.
         fx = W - MARGIN
         if self.vx > 0 and self.bx >= fx - BALL:
-            if abs(self.by - self.fly.y) < PAD_H / 2 + BALL:
-                self.vx = -abs(self.vx)
-                self.vy += (self.by - self.fly.y) * 0.09
-                self.fly.reinforce(+1.0)
+            caught = abs(self.by - self.fly.y) < PAD_H / 2 + BALL
+            # In dense mode the per-frame signal has already done the
+            # teaching; a terminal bit on top would credit the whole rally to
+            # its final frame. The hit still counts for the score either way.
+            if caught:
+                self._rebound(self.fly.y, -1.0)
+                self.fly.reinforce(+1.0, learn=not dense)
             else:
-                self.fly.reinforce(-1.0)
+                self.fly.reinforce(-1.0, learn=not dense)
                 self.points["human"] += 1      # the fly missed: your point
                 self.serve(+1)
 
@@ -340,11 +401,174 @@ class Court:
         hx = MARGIN
         if self.vx < 0 and self.bx <= hx + BALL:
             if abs(self.by - self.human_y) < PAD_H / 2 + BALL:
-                self.vx = abs(self.vx)
-                self.vy += (self.by - self.human_y) * 0.09
+                self._rebound(self.human_y, +1.0)
             else:
                 self.points["fly"] += 1        # you missed: the fly's point
                 self.serve(-1)
+
+
+class BrainPanel:
+    """A live readout of the circuit, beside the court.
+
+    Five rows, following the signal from the world to the muscles:
+
+        PN      what the fly is being shown, as projection neuron drive
+        KC      the sparse code -- ~5% of 4,064 Kenyon cells, the rest dark
+        MBON    output cells, coloured by the action channel each belongs to
+        drives  the three numbers the choice is an argmax over
+        gains   how far each MBON's KC synapses have been depressed
+
+    The last row is the memory. It starts uniform and darkens where dopamine
+    has written something, so you can watch learning happen rather than infer
+    it from the score.
+
+    Kenyon cells go through a `PhotoImage` rather than 4,064 canvas items:
+    one `put` of a whole image is a few hundred microseconds, where four
+    thousand `itemconfig` calls would blow the 16 ms frame budget on its own.
+    """
+
+    W = 300
+    KC_SIDE = 64                      # 64x64 = 4,096 cells, enough for 4,064
+
+    def __init__(self, parent, fly, tk):
+        self.tk = tk
+        self.fly = fly
+        self.canvas = tk.Canvas(parent, width=self.W, height=H,
+                                bg="#0d0e14", highlightthickness=0)
+        self.canvas.pack(side="left", fill="y")
+        c = self.canvas
+
+        def label(y, text):
+            c.create_text(10, y, text=text, anchor="w", fill="#5c6478",
+                          font=("monospace", 8))
+
+        # -- projection neurons ------------------------------------------
+        label(14, "PROJECTION NEURONS  what it sees")
+        # Downsampled 3:1. The input is two smooth Gaussian bumps, so 92 bars
+        # look identical to 276 and cost a third as many canvas updates --
+        # and canvas updates, not arithmetic, are what this panel spends its
+        # frame budget on.
+        self.pn_group = 3
+        self.pn_bars = self._strip(c, 22, 44, fly.n_pn // self.pn_group,
+                                   "#5ac8fa")
+
+        # -- kenyon cells --------------------------------------------------
+        label(80, f"KENYON CELLS  {fly.brain.n_kc} cells, ~5% active")
+        side = self.KC_SIDE
+        self.kc_img = tk.PhotoImage(width=side, height=side)
+        c.create_image(10, 88, image=self.kc_img, anchor="nw")
+        self.kc_dark = "{" + " ".join(["#14161f"] * side) + "}"
+        self.kc_img.put(" ".join([self.kc_dark] * side))
+
+        # -- MBONs ---------------------------------------------------------
+        label(174, "MBONs  output cells, by action channel")
+        n_mbon = fly.brain.n_mbon
+        groups = np.array_split(np.arange(n_mbon), fly.n_actions)
+        self.mbon_colour = np.empty(n_mbon, dtype=object)
+        palette = ("#ff6b6b", "#9aa0b5", "#6bcB77")      # UP / HOLD / DOWN
+        for k, idx in enumerate(groups):
+            self.mbon_colour[idx] = palette[k % len(palette)]
+        self.mbon_bars = self._strip(c, 182, 50, n_mbon, "#9aa0b5")
+        # Channel colours are fixed by the readout groups, so set them once
+        # rather than re-issuing 97 itemconfig calls every frame.
+        for bar, colour in zip(self.mbon_bars, self.mbon_colour):
+            c.itemconfig(bar, fill=colour)
+
+        # -- drives ---------------------------------------------------------
+        label(248, "DRIVES  the choice is an argmax of these")
+        self.drive_bars = []
+        self.drive_text = []
+        for k in range(fly.n_actions):
+            y = 256 + k * 22
+            self.drive_bars.append(
+                c.create_rectangle(70, y, 70, y + 14, fill=palette[k],
+                                   width=0))
+            c.create_text(10, y + 7, text=ACTION_NAMES[fly.n_actions][k],
+                          anchor="w", fill="#9aa0b5", font=("monospace", 8))
+            self.drive_text.append(
+                c.create_text(self.W - 10, y + 7, text="", anchor="e",
+                              fill="#5c6478", font=("monospace", 8)))
+        c.create_line(70, 252, 70, 256 + fly.n_actions * 22,
+                      fill="#262a38")
+
+        # -- learned gains ---------------------------------------------------
+        label(340, "MEMORY  KC->MBON gain per output cell")
+        self.gain_bars = self._strip(c, 348, 46, n_mbon, "#ffd166")
+        self.note = c.create_text(10, H - 14, text="", anchor="w",
+                                  fill="#5c6478", font=("monospace", 8))
+
+    def _strip(self, c, top: int, height: int, n: int, colour: str):
+        """`n` vertical bars filling the panel width, created once."""
+        bars = []
+        x0, span = 10, self.W - 20
+        w = span / n
+        for i in range(n):
+            x = x0 + i * w
+            bars.append(c.create_rectangle(x, top + height, x + max(w, 1.0),
+                                           top + height, fill=colour,
+                                           width=0))
+        return bars
+
+    def _fill(self, bars, values, top: int, height: int):
+        peak = float(np.max(values)) if len(values) else 0.0
+        if peak <= 0:
+            peak = 1.0
+        c = self.canvas
+        tops = top + height - np.asarray(values, dtype=np.float64) / peak * height
+        base = top + height
+        for bar, y in zip(bars, tops):
+            x0, _, x1, _ = c.coords(bar)
+            c.coords(bar, x0, float(y), x1, base)
+
+    def update(self) -> None:
+        fly = self.fly
+        if fly.last_pn is None:
+            return
+        brain = fly.brain
+        # Recomputed rather than threaded through `Fly.step`, which costs a
+        # second forward pass (~0.4 ms) and keeps the panel from reaching
+        # into the middle of the model.
+        kc = brain.kenyon_cells(fly.last_pn)
+        mbon = brain.mbon_rates(kc)
+
+        pn = np.asarray(fly.last_pn, dtype=np.float64)
+        keep = (len(pn) // self.pn_group) * self.pn_group
+        self._fill(self.pn_bars,
+                   pn[:keep].reshape(-1, self.pn_group).max(axis=1), 22, 44)
+        self._fill(self.mbon_bars, np.abs(mbon), 182, 50)
+
+        # Kenyon cells: active ones lit, laid out row-major.
+        side = self.KC_SIDE
+        grid = np.zeros(side * side, dtype=np.float32)
+        grid[:len(kc)] = kc
+        lit = grid > 0
+        rows = []
+        for r in range(side):
+            row = lit[r * side:(r + 1) * side]
+            rows.append("{" + " ".join(
+                "#ffd166" if v else "#14161f" for v in row) + "}")
+        self.kc_img.put(" ".join(rows))
+
+        drives = np.asarray(fly.last_drives, dtype=np.float64)
+        span = float(np.abs(drives).max()) or 1e-9
+        for k, bar in enumerate(self.drive_bars):
+            width = drives[k] / span * (self.W - 90)
+            y0 = 256 + k * 22
+            self.canvas.coords(bar, 70, y0, 70 + width, y0 + 14)
+            self.canvas.itemconfig(
+                self.drive_text[k],
+                text=("<-- chosen" if k == fly.last_action else ""))
+
+        gains = np.bincount(brain.post_idx, weights=brain.state.gain,
+                            minlength=brain.n_mbon)
+        counts = np.bincount(brain.post_idx, minlength=brain.n_mbon)
+        mean = np.divide(gains, counts, out=np.ones_like(gains),
+                         where=counts > 0)
+        self._fill(self.gain_bars, mean, 348, 46)
+        self.canvas.itemconfig(
+            self.note,
+            text=f"{int(lit.sum()):4d} KC active   "
+                 f"{100*brain.depressed_fraction():.1f}% depressed")
 
 
 class Game:
@@ -353,6 +577,11 @@ class Game:
 
         self.a = a
         self.fly = Fly(a)
+        if a.drill:
+            rate = dense_drill(a, self.fly, a.drill)
+            print(f"drill finished at {100*rate:.1f}% "
+                  f"(random policy scores 22.5% in this encoding)",
+                  flush=True)
         if a.pretrain:
             print(f"warming up on {a.pretrain} single decisions ...",
                   flush=True)
@@ -363,12 +592,23 @@ class Game:
                   f"(chance {100*report['chance']:.1f}%)", flush=True)
         self.court = Court(a, self.fly, np.random.default_rng(a.seed))
         self.human_y = H / 2
-        self.canvas = tk.Canvas(root, width=W, height=H, bg="#12131a",
+        # Court and brain panel side by side in their own row, so the status
+        # bar below still spans the full width.
+        row = tk.Frame(root, bg="#12131a")
+        row.pack()
+        self.canvas = tk.Canvas(row, width=W, height=H, bg="#12131a",
                                 highlightthickness=0)
-        self.canvas.pack()
+        self.canvas.pack(side="left")
+        self.panel = (BrainPanel(row, self.fly, tk) if a.brain else None)
+        # Belt and braces against the window resizing itself: the label is
+        # given a fixed character width so it never asks for more room, and
+        # the toplevel is pinned and made non-resizable so it cannot grant it
+        # even if something else changes size.
         self.status = tk.Label(root, text="", font=("monospace", 10),
-                               bg="#12131a", fg="#9aa0b5", anchor="w")
+                               bg="#12131a", fg="#9aa0b5", anchor="w",
+                               width=120)
         self.status.pack(fill="x")
+        root.resizable(False, False)
         root.bind("<Motion>", self.on_mouse)
         root.bind("<Up>", lambda e: self.nudge(-26))
         root.bind("<Down>", lambda e: self.nudge(26))
@@ -397,7 +637,20 @@ class Game:
         print(f"saved -> {path}")
 
     def tick(self):
-        self.court.step(self.human_y)
+        # A drilled fly keeps being taught the way it was drilled. Switching
+        # back to one bit per rally does not merely stop the learning, it
+        # actively undoes it: benchmarked straight after a drill, the hit rate
+        # fell from 100% at ball 40 to 40% by ball 200 under terminal reward.
+        # Sparse feedback is worse than none once there is a good policy to
+        # wreck.
+        self.court.step(self.human_y, dense=bool(self.a.drill))
+        # The panel refreshes on alternate frames. It costs about as much as
+        # everything else in a tick put together, and a readout at 30 Hz is
+        # indistinguishable from one at 60 -- whereas overrunning the 16 ms
+        # budget makes the ball itself stutter, which is not.
+        self.frame = getattr(self, "frame", 0) + 1
+        if self.panel is not None and self.frame % 2 == 0:
+            self.panel.update()
         self.draw()
         self.root.after(self.a.frame_ms, self.tick)
 
@@ -428,13 +681,19 @@ class Game:
         rate = 100.0 * self.fly.hits / seen if seen else 0.0
         names = ACTION_NAMES[self.fly.n_actions]
         drives = " ".join(f"{d:+.4f}" for d in self.fly.last_drives)
+        # Every field is fixed-width. A Label sizes itself to its text and the
+        # toplevel sizes itself to the Label, so a status line that grows from
+        # "1 hits / 1 balls" to "123 hits / 456 balls" resizes the whole
+        # window mid-rally. Padding the numbers keeps the string length
+        # constant no matter what the values do.
         self.status.config(
-            text=(f" fly: {self.fly.hits} hits / {seen} balls ({rate:.0f}%)   "
+            text=(f" fly: {self.fly.hits:4d} hits /{seen:5d} balls "
+                  f"({rate:5.1f}%)   "
                   f"{names[self.fly.last_action]:4s} "
                   f"[{drives}]   "
-                  f"trials {b.state.trials}   "
-                  f"depressed {100*b.depressed_fraction():.1f}%   "
-                  f"explore {self.fly.explore:.1f}      "
+                  f"trials {b.state.trials:6d}   "
+                  f"depressed {100*b.depressed_fraction():5.1f}%   "
+                  f"explore {self.fly.explore:5.3f}      "
                   f"[s] save  [r] reset  [q] quit"))
 
 
@@ -506,6 +765,49 @@ def policy_report(fly, rng, trials: int = 2000) -> dict:
     }
 
 
+def dense_drill(a, fly, balls: int, *, quiet: bool = False) -> float:
+    """Train against a ball machine with per-frame reinforcement.
+
+    The fly plays a returner that never misses, and is reinforced every frame
+    on whether its move closed the gap to the ball rather than once per rally
+    on whether it caught it. Measured on the batched backend, that is the
+    difference between 28% and 74%.
+
+    Nothing here is supervision: the fly is never told which way to move, only
+    whether what it did helped. A real animal has exactly that -- continuous
+    sensory consequences -- and does not wait for a terminal verdict.
+    """
+    court = Court(a, fly, np.random.default_rng(a.seed + 3))
+    start = fly.hits + fly.misses
+    block = max(1, balls // 8)
+    last = (fly.hits, start)
+    if not quiet:
+        print(f"drilling {balls} balls with per-frame reinforcement ...")
+        print(f"{'balls':>7s} {'block':>8s} {'overall':>9s} {'depressed':>10s}")
+
+    frames = 0
+    while (fly.hits + fly.misses) - start < balls and frames < balls * 4000:
+        # A returner that tracks perfectly, so every rally comes back and the
+        # fly sees the maximum number of balls per second of simulation.
+        court.step(float(np.clip(court.by, PAD_H / 2, H - PAD_H / 2)),
+                   dense=True)
+        frames += 1
+        seen = fly.hits + fly.misses
+        if not quiet and seen - last[1] >= block:
+            print(f"{seen - start:7d} "
+                  f"{100*(fly.hits-last[0])/max(seen-last[1],1):7.0f}% "
+                  f"{100*fly.hits/max(seen,1):8.1f}% "
+                  f"{100*fly.brain.depressed_fraction():9.1f}%")
+            last = (fly.hits, seen)
+
+    rate = fly.hits / max(fly.hits + fly.misses, 1)
+    fly.hits = fly.misses = 0          # the window starts from a clean score
+    fly.y = H / 2
+    fly.prev_ball_y = H / 2
+    fly.brain.reset_trace()
+    return rate
+
+
 def wilson(hits: int, n: int, z: float = 1.96) -> tuple[float, float]:
     """Wilson score interval, which behaves at small n where normal does not."""
     if n == 0:
@@ -540,6 +842,12 @@ def benchmark(a) -> int:
     before = policy_report(fly, np.random.default_rng(a.seed + 99))
     print(f"policy before: {100*before['agreement']:.1f}% agreement with "
           f"tracking (chance {100*before['chance']:.1f}%)")
+
+    if a.drill:
+        rate = dense_drill(a, fly, a.drill)
+        mid = policy_report(fly, np.random.default_rng(a.seed + 99))
+        print(f"after {a.drill} drilled balls: {100*rate:.1f}% during the "
+              f"drill, policy now {100*mid['agreement']:.1f}%")
 
     if a.pretrain:
         pretrain(fly, a.pretrain, np.random.default_rng(a.seed + 7))
@@ -644,6 +952,12 @@ if __name__ == "__main__":
     ap.add_argument("--explore-absolute", action="store_true",
                     help="fixed-magnitude noise instead of noise scaled to the "
                          "drive spread, which pins signal-to-noise forever")
+    ap.add_argument("--no-brain", dest="brain", action="store_false",
+                    help="hide the live circuit panel beside the court")
+    ap.add_argument("--drill", type=int, default=0, metavar="BALLS",
+                    help="dense per-frame reinforcement against a ball "
+                         "machine before playing. Reward and shock only, no "
+                         "supervision")
     ap.add_argument("--pretrain", type=int, default=0, metavar="TRIALS",
                     help="supervised single-decision warm-up before playing")
     ap.add_argument("--trace-tau", type=float, default=2.0,

@@ -350,14 +350,47 @@ every timestep. See [docs/FINDINGS.md](docs/FINDINGS.md).
 ## Playing pong against it
 
 ```bash
-flybrain pong
+flybrain pong --drill 90      # 90 balls of training, then the window opens
 ```
 
 You are the left paddle, the fly is the right one, and it is taught only by
-the dopamine rule -- reward on intercept, punishment on miss. It does not work
-yet: 19.6% against a chance rate of 18.9% over 500 balls. A rally is ~137
-decisions yielding one bit at the end, and the eligibility trace cannot reach
-back that far. The same machinery learns a single-decision task to 100%. See
+the dopamine rule -- no gradients, no labels, never told which way to move. A
+live panel beside the court shows the circuit working: what the projection
+neurons see, which Kenyon cells are firing, what the MBON channels are
+saying, and where dopamine has written into the KC->MBON gains.
+
+Against a returner that never misses, 200 balls:
+
+| teaching signal | hit rate |
+|---|---:|
+| random actions | 22.5% |
+| sparse: one bit per rally, ~137 decisions later | 92.0% |
+| **dense: was that move toward the ball** | **100.0%** |
+
+For most of this project's history this read ~21% and the notes said sparse
+reward could not work. That was wrong, and it was a bug rather than a
+finding: an uncentred readout gave one action a constant advantage, so the
+paddle sat **parked** against a wall and every measurement was the geometric
+odds of a ball arriving in a stationary 96-pixel window, `96/460`.
+
+How much the feedback's *structure* matters turns out to depend on how much
+the encoding has already done. `pong` hands the fly `ball_y − paddle_y`
+already subtracted. `flybrain train-pong` does not — it supplies ball
+position and paddle position on separate channels and makes the circuit
+discover the relation. There sparse reward plateaus at **28.8%** against a
+19.0% frozen-gain control, and stays there through MBON→MBON lateral
+inhibition, bidirectional plasticity, a learnable output map and three
+curricula, while dense feedback reaches **74.1%**.
+
+What it learns is *tracking*, not prediction: the paddle sits 6 px from where
+the ball is and 137 px from where it will arrive. That is the right strategy
+here, since it moves faster than the ball drifts — and it could not do
+otherwise, because ball *x* is never supplied, so time-to-arrival is not
+derivable.
+
+What reinforcement teaches well is single decisions. `flybrain teach` maps
+six real odours onto three actions at **100%, on all 64 flies**, and still
+holds 32 arbitrary associations at twice chance. See
 [docs/FINDINGS.md](docs/FINDINGS.md).
 
 ## Next steps

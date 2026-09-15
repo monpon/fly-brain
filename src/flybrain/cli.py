@@ -23,6 +23,12 @@ APPS = {
     "react": ("react", "show the fly something, read what its neurons do"),
     "remember": ("remember", "what the circuit can hold on to, and how long"),
     "pong": ("pong", "play pong against the dopamine rule"),
+    "teach": ("teach", "what reward and punishment alone can teach: "
+                       "one stimulus, one choice, one outcome"),
+    "shape": ("shape", "teach interception by curriculum, the way an "
+                       "animal is actually trained"),
+    "train-pong-gpu": ("train_pong_gpu", "the same drill, hundreds of "
+                                        "flies at once on the GPU"),
     "train-pong": ("train_pong", "drill a fresh fly on intercepting, "
                                  "reward and shock only"),
     "train-brain": ("train_brain", "train a circuit on input/output pairs"),
