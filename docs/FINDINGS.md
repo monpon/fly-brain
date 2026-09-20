@@ -919,6 +919,22 @@ a returner that never misses:
 | sparse, one bit per rally | **92.0%** | 87.4-95.0 |
 | dense, per-frame | **100.0%** | 98.1-100.0 |
 
+**These are rally-sampled, and that is not a neutral choice.** A ball only
+reaches the fly again if it returned the last one, so most of what gets
+scored is an opponent return whose trajectory depends on where the fly
+itself struck the ball. The same conditioning inflated the aiming numbers by
+~17 points (40.0% rally against 23.0% on independent serves), so these
+figures are owed the same check.
+
+A first attempt at it is not trustworthy either. Forcing a fresh
+`Court.serve` after every ball gives 57.3% +/- 2.3 against 94.7% +/- 3.4
+rally-sampled, but `Court.serve` starts the ball at mid-court: the fly gets
+~76 frames of warning where a rally return gives ~430, so that comparison
+measures reaction time as much as independence. The flight-matched version --
+independent height and angle, ball entering from the opponent's wall -- has
+not been run to completion. Until it has, treat the headline as measured
+under favourable sampling by an unknown margin.
+
 Sparse reward was never the problem *here*. One bit per ~137 decisions is
 ample for this encoding, which hands the circuit `ball_y - paddle_y` already
 subtracted -- most of the task solved before the mushroom body sees it. Every
@@ -1009,12 +1025,36 @@ paddle visits are not the states it was scored on.
 Six further attempts, all measured against the same task and the same floor.
 Three change the plasticity, three change the curriculum:
 
+The three plasticity mechanisms were first measured on **one fly with one
+seed**, which turned out to be worthless: the across-fly spread is sd 2.9-3.7,
+so every difference reported was inside one standard deviation. Re-run on the
+batched backend at 96 flies -- 96 seeds, 250 balls each, SEM around 0.35
+points:
+
+| change | hit rate | SEM | vs baseline | single seed had said |
+|---|---:|---:|---:|---:|
+| baseline, depression only | 23.0% | 0.38 | -- | 28.8% |
+| + MBON->MBON lateral inhibition | 23.5% | 0.33 | +0.5 (1.0 SE) | 28.1% |
+| + bidirectional (opponent) plasticity | 23.4% | 0.30 | +0.4 (0.8 SE) | 26.7% |
+| + learnable output map | **21.6%** | 0.34 | **-1.4 (2.7 SE)** | 22.6% |
+
+Lateral inhibition and bidirectional plasticity are **confirmed nulls**, with
+error bars. A learnable output map is the one real effect and it is mildly
+**harmful** -- which fits the earlier sweep, where raising `readout_rate`
+collapsed the policy (agreement 30.6% at 0.005 down to 8.8% at 0.05, with the
+shuffle null falling alongside it as the action distribution degenerated).
+
+The single-seed column is the lesson. It got two of the three directions
+wrong: lateral and bidirectional both read *below* baseline and are in fact
+marginally above, and bidirectional at 26.7% was written up here as mildly
+harmful when the population says +0.4. Three mechanisms, one sample each, two
+wrong signs.
+
+Curricula, measured on single flies and not yet re-run batched -- treat these
+the same way until they are:
+
 | change | hit rate | policy vs null |
 |---|---:|---:|
-| baseline, depression only | 28.8% | 59.6% / 45.8% |
-| + MBON->MBON lateral inhibition | 28.1% | -- |
-| + bidirectional (opponent) plasticity | 26.7% | -- |
-| + learnable output map | 22.6% | 25.8% / 15.6% |
 | shaping on serve distance | 23.6% | 56.2% / 45.9% |
 | shaping on paddle size and ball speed | 28.1% | 55.6% / 46.3% |
 | shaping on decision frequency (8 vs 134) | 28.0% | 57.3% / 46.6% |
@@ -1023,6 +1063,12 @@ Three change the plasticity, three change the curriculum:
 Reward-driven learning lands 10-14 points above null in every condition. The
 last row is the same circuit, the same frozen readout, and about a hundred
 trials of a supervised signal.
+
+Note the baseline moved from 28.8% to 23.0% between the two measurements.
+Part of that is seed luck -- 28.8% sits 1.6 sd above the population mean --
+and part is training length, 1,000 balls then against 250 now. Which share is
+which has not been separated, so the batched numbers should only be compared
+with each other.
 
 Two of those curricula failed for reasons worth recording separately, because
 both were mistakes in the experiment rather than results about the fly.
@@ -1107,6 +1153,407 @@ decision its own trial.** Where a task can be decomposed into stimulus-action
 pairs with immediate feedback, it learns to ceiling. Where it cannot, it
 extracts a bounded amount and no mechanism tested here changes the bound.
 
+### MBON -> DAN feedback buys extinction, which the model could not do at all
+
+Of the fifteen unmodelled mushroom-body pathways, MBON -> DAN (11,020
+synapses) is the one with a principled story. MBONs synapse back onto the
+dopaminergic neurons that write to them, so the teaching signal can depend on
+what the circuit *already predicts* rather than only on what just happened.
+Most MBONs are inhibitory -- signed from predicted neurotransmitter, 1,601 of
+2,538 extracted pairs -- so a well-learned stimulus suppresses its own
+dopamine. Nothing in the code decides that; the anatomy does.
+
+Wired up, the outcome becomes a prediction error. Pairing one odour with
+punishment repeatedly, the fraction of the initial dopamine that the
+circuit's own prediction cancels by trial 40:
+
+| mbon_dan | 1 | 5 | 20 | 50 | 200 |
+|---|---:|---:|---:|---:|---:|
+| cancelled | 19.9% | 51.9% | 79.7% | 87.8% | 92.2% |
+
+With the loop off it is flat at 0.0% by construction. Above ~5 the excitatory
+pairs blow the trial-1 dopamine up from 54 to 2,810 and the regime is
+pathological, so the useful range is 1-5.
+
+**The behavioural consequence is extinction.** Train geosmin with shock, then
+present geosmin alone thirty times, with the passive `recovery` drift set to
+zero so forgetting cannot be mistaken for the mechanism:
+
+| mbon_dan | recovered after 30 unreinforced presentations |
+|---|---:|
+| 0.0 | **0.0%** |
+| 1.0 | 1.9% |
+| 3.0 | **8.2%** |
+
+At 0.0 the fly cannot extinguish *in principle*: with no reinforcement,
+`dan_activity` is all zeros, there is no dopamine, and no gain moves. The
+memory is permanent. With the loop, an unreinforced presentation is not
+silent -- the memory drives its MBONs, those drive their DANs, and the
+resulting dopamine depresses the synapses carrying it. The circuit unlearns
+because it predicted something that did not happen.
+
+This is the first pathway added here that buys a *capability* rather than
+moving a number, and extinction has decades of behavioural literature to
+check against.
+
+The caveat that matters is that 8.2% over thirty trials is partial
+extinction, not full. The small absolute valences -- around 0.001 -- are
+*not* a caveat, though it is tempting to read them as one: `default_readout`
+is L1-normalised, so the scale is a units choice, and actions are selected by
+`argmax` over drives, which depends only on relative differences. A valence
+of 0.001 drives behaviour exactly as firmly as a valence of 1.0 would.
+
+One defect worth recording. The feedback gain originally carried a ~20x unit
+conversion, because MBON rates run near 0.05 against a raw DAN activity of
+1.0 -- so `mbon_dan=1` cancelled 0.4% and the useful range sat near 100. It
+is now divided by a measured MBON reference (`FlyBrain._mbon_scale`, taken
+once from the untrained circuit on fixed-seed stimuli) so that 1.0 means
+feedback comparable to the outcome it modulates. The numbers above are
+post-fix.
+
+### Re-aiming every frame is worse than committing once (superseded -- see the correction below)
+
+The aiming fly decides once per ball: it sees position and velocity at the
+serve, picks a target bin, and moves there. The obvious improvement is to let
+it revise that target on every frame as better information arrives. It makes
+things worse.
+
+400 balls, 6 bins, 4 levels, seed 1:
+
+| policy | hit rate | 95% CI |
+|---|---:|---|
+| commit once per ball | **33.8%** | 29.3-38.5% |
+| re-aim every frame, smoothing 0.15 | 27.0% | 22.9-31.6% |
+| re-aim every frame, smoothing 0.35 | 26.5% | 22.4-31.0% |
+
+Low-pass filtering the target does not rescue it, and the two smoothing
+constants land on top of each other, so this is not a tuning problem. The
+"within the window" diagnostic moves the same way (33.8% -> 28.2%/28.5%),
+which rules out the paddle simply failing to arrive in time.
+
+The reason is that re-aiming replaces one decision per ball with one decision
+per frame, all of them reinforced by the same single outcome. Credit that was
+assigned to one choice now spreads over ~55, and the early frames -- when the
+ball is far away and the estimate is worst -- get the same weight as the late
+ones. Committing once is not a simplification of continuous tracking here; it
+is what makes the credit assignment tractable.
+
+### A fast paddle hides the fact that the fly only tracks
+
+The dense drill reaches 100.0% against a 22.5% random baseline, and it is
+worth being clear about what that does and does not show. Per-frame
+reinforcement rewards closing the gap to the ball, so tracking *is* the
+optimal policy for that reward, and with the default paddle speed tracking is
+a complete solution. The diagnostics say so directly: 87.2% of moves go at
+the ball, and the policy agrees with pure tracking 67.2% of the time against
+a 45.7% shuffle null.
+
+Handicapping the paddle separates the two. Same fly, same synapses, only
+`--fly-speed` changed, 60 balls each:
+
+| paddle speed | hit rate | moves that went at the ball |
+|---|---:|---:|
+| 7 (default) | 98.3% | 80.1% |
+| 4 | 98.3% | 96.3% |
+| 2 | 53.3% | 76.1% |
+
+At speed 4 it commits *harder* to tracking (96.3%) and stays perfect. At
+speed 2, where chasing cannot work, it drops to 53.3% -- it does not fall
+back on anticipation, it simply fails. Tracking is not one strategy among
+several for this fly; it is the only one, and a fast paddle conceals that
+entirely.
+
+Training at the handicapped speed does not fix it. A fresh fly drilled 120
+balls at speed 2 with `--predict`, which adds a ball-x channel and rewards
+progress toward the computed intercept:
+
+| fly | trained at | at speed 2 | moves at the ball |
+|---|---|---:|---:|
+| tracker | speed 7 | 53.3% (40.9-65.4) | 76.1% |
+| `--predict` | speed 2 | 26.7% (17.1-39.0) | 46.3% |
+| parked paddle | -- | ~21% | -- |
+
+26.7% is statistically indistinguishable from parking, and 46.3% is *below*
+the 50% chance line for moving toward the ball, so the predicting fly has no
+coherent policy rather than a poor one. A handicapped tracker beats a
+purpose-trained predictor by a factor of two.
+
+This is the same boundary the aimer found from the other side -- 33.8%
+against a 48.6% ceiling for its own 64-address encoding -- reached by a
+different route. Reward and punishment on this circuit buy tracking and
+single-decision association; they do not buy trajectory prediction.
+
+### Learning the intercept: capacity and precision are incompatible
+
+`flybrain intercept` asks the question prediction always needed asking:
+shown the ball at an arbitrary moment in its flight -- height, vertical
+velocity, distance still to travel -- name the slice of court it will arrive
+in. The label is where the ball actually lands, which the animal can watch
+happen, and it is available at every frame rather than once per ball. This
+measures the guess alone; every earlier attempt measured the hit rate, which
+confounds guessing wrong with failing to walk there in time.
+
+It works, and it is not enough. Sweeping input resolution against the number
+of court slices, 250 serves x 8 moments, evaluated greedily on 200 unseen
+serves:
+
+| levels | bins | addresses | exact | ceiling | within window | of ceiling |
+|---:|---:|---:|---:|---:|---:|---:|
+| 3 | 4 | 27 | 32.9% | 59.8% | 24.9% | 55% |
+| 4 | 4 | 64 | **37.8%** | 67.7% | 26.4% | 56% |
+| 6 | 4 | 186 | 35.8% | 73.7% | **27.8%** | 49% |
+| 4 | 6 | 64 | 17.9% | 55.3% | 24.8% | 32% |
+| 8 | 8 | 371 | 9.6% | 69.8% | 20.5% | 14% |
+
+37.8% against a 25% chance rate is real learning. The `within window` column
+is the one that matters for catching a ball, and it does not move: 20-28%
+everywhere, against roughly 21% for a paddle that never moves at all.
+
+Two constraints collide. The paddle catches within +/-48 px. Four bins are
+95.5 px wide, so even a *correct* guess can leave the bin centre 48 px from
+the ball -- which is why the window score (26.4%) is *lower* than exact-bin
+accuracy (37.8%). Six bins are 64 px wide and a correct guess always
+catches, but 6 bins over 64 situations is a capacity problem, and the circuit
+delivers 17.9%. Precision demands more bins; capacity forbids them. The
+product is ~25% whichever way the trade is made.
+
+The capacity figure is not a guess. Measured on arbitrary sparse patterns
+with the same rule and readout:
+
+| stimuli | 4 | 8 | 16 | 32 | 64 |
+|---|---:|---:|---:|---:|---:|
+| 3 actions | 83.3% | 79.2% | 43.8% | 42.7% | 38.0% |
+| 6 actions | 50.0% | 45.8% | 33.3% | 20.8% | 19.8% |
+
+The intercept task presents ~64 situations and 6 bins, for which this
+predicts 19.8%. Measured: 21.7%. The fly is sitting exactly on its capacity
+ceiling, and that -- not credit assignment -- is what limits it.
+
+### Three wrong explanations, and the control that settled it
+
+Recorded because the wrong answers were each plausible and each cost an
+experiment.
+
+* **Credit assignment.** The obvious story was that one outcome spread over
+  fifty decisions taught nothing, so `intercept` gives immediate
+  per-decision credit: was *this* guess right, not was the ball eventually
+  caught. No change. `--reaim` had already hinted at this -- teaching every
+  decision against the observed landing left the aim unchanged (32.5% inside
+  the window against 33.8%) and cost only execution.
+* **Untrained channel bias.** Before any training, one of six bins wins
+  81.5% of decisions and three win *never*: the spread between channel mean
+  drives is ~3x the stimulus-driven variation within a channel, so `argmax`
+  is decided by channel identity rather than by what the fly sees. This is
+  real, and it is the parked-paddle bug one level deeper -- centring each
+  readout column removes that column's own offset but does not equalise the
+  drive a channel produces for a typical KC pattern. Subtracting the measured
+  bias recovered all six bins and left accuracy unchanged.
+* **Place-code overlap.** Gaussian place codes over continuous inputs make
+  neighbouring situations nearly identical to the mushroom body, so learning
+  one should partly unlearn its neighbour. Replacing them with one arbitrary
+  orthogonal pattern per address, same labels and trial count, scored *worse*
+  (15.0% against 22.0%).
+
+What settled it was not another hypothesis but a control: rerunning the same
+loop on the task `teach` had already characterised, where the answer was
+known in advance. The loop reproduced it at low capacity (100% at 2
+associations, 83% at 4, 79% at 8) and the intercept result then fell exactly
+on the measured curve. Two bugs in the experiment itself surfaced on the way
+there -- a bounce that did not flip the sign of vertical velocity, so the fly
+was shown states that did not imply their own labels, and a fixed sampling
+time that pinned ball-x and left one of three input channels constant. Both
+read as "the circuit cannot learn this".
+
+### Correction: the aiming numbers above are measured on a biased sample
+
+Two things are wrong with every pong hit rate and aim statistic in this
+section, and both inflate them.
+
+**Rally conditioning.** `benchmark` collects aim statistics during play, and
+a rally only continues when the fly returns the previous ball. The serves it
+gets measured on are therefore disproportionately the ones it can already
+handle. Scoring the *same* trained fly on independent synthetic serves:
+
+| how the aim is scored | in the catch window | median error |
+|---|---:|---:|
+| during rallies (`benchmark`) | 40.0% | 70.8 px |
+| fresh serves, ball in the left half | 23.0% | 108.9 px |
+| fresh serves, ball at the turn point | 20.1% | 121.9 px |
+| a paddle that never moves | ~21% | -- |
+
+The honest figure is ~23%, against ~21% for not moving. The batched backend,
+which samples serves independently by construction, independently gives
+22.4% +/- 0.3 over 128 flies -- so the two paths agree once they are asked
+the same question, and it was the measurement that was generous.
+
+**Seed variance swamps every comparison at this sample size.** The same
+configuration, one fly per seed:
+
+| seed | 1 | 2 | 3 | 4 |
+|---|---:|---:|---:|---:|
+| 8 bins, catch reward | 40.0% | 37.5% | 22.5% | 26.2% |
+| 5 bins, exact reward | 32.5% | 42.5% | 23.8% | 28.8% |
+
+Means 31.6% and 31.9%. Any single-seed claim of an improvement here is
+noise, and the 27.0% figure for re-aiming above is a single seed measured
+against a training distribution that did not include the states re-aiming
+actually presents -- `aim_drill` sampled ball x only in the left half, which
+is right for one decision at the turn and wrong for a decision every frame.
+It now follows the play mode.
+
+What survives all of this is the decision-only result from `intercept`,
+which never touches a rally: 40.7% exact bin against a 30.7% majority
+baseline over five seeds. And one positive that the biased metric was hiding
+rather than inventing -- the estimate genuinely sharpens as the ball closes,
+measured on independent serves:
+
+| distance to go | 94% | 71% | 48% | 37% | 14% |
+|---|---:|---:|---:|---:|---:|
+| median aim error | 116 px | 111 px | 88 px | **77 px** | 85 px |
+
+That is real extrapolation, and it plateaus at 77 px against a 48 px catch
+window, which is why the sharpening never reaches the threshold that decides
+whether a ball is returned. It also stops improving in the final quarter,
+where the answer should be nearly trivial -- the limit there is that
+`--levels 4` lets the fly express ball height as one of four values, so the
+finest answer available is ~95 px wide.
+
+### The aiming task belongs on the GPU, and was not on it
+
+`batched.py` existed for exactly the sweeps above and only the tracking and
+`--predict` drills were wired into it, so every aiming comparison ran as a
+sequence of single-fly numpy jobs at ~80 s each. `flybrain train-aim-gpu`
+puts the aimer on the batched backend: 537,600 fly-trials in 365 s, 128 to
+256 flies at once, which turns a point estimate into a mean with an SEM over
+hundreds of flies. Readouts are bit-identical to the numpy path at 3, 5 and 8
+actions, and `check_parity` holds at 5.8e-10 on the drives and 1.8e-7 on the
+gains.
+
+The lesson is the same one this file keeps recording, one level up: the
+sequential runs were not just slow, they were *underpowered*, and the
+underpowering is what produced the wrong conclusions.
+
+### Bidirectional plasticity doubles what the circuit can store
+
+The depression-only rule is a one-way, floored budget. Dopamine can only
+lower KC->MBON gains, into [gain_floor, 1]. Each association spends some of
+the synapses from the Kenyon cells that were active; the next association
+shares many of those cells and spends more; and a gain sitting at the floor
+carries no further information with no way to restore it. So learning
+something new damages something old, permanently.
+
+Letting the rule potentiate as well as depress -- in the opponent-dopamine
+form, so it does not erase what it teaches -- changes the capacity curve
+substantially. Arbitrary sparse patterns, 75 trials each, 3 seeds:
+
+**6 actions, chance 16.7%** (accuracy, [depressed fraction])
+
+| rule | 4 | 8 | 16 | 32 | 64 |
+|---|---:|---:|---:|---:|---:|
+| depression only | 50.0 [2.2] | 45.8 [3.6] | 33.3 [3.4] | 20.8 [2.7] | 19.8 [2.2] |
+| bidirectional | 75.0 [1.7] | 83.3 [2.9] | 50.0 [2.5] | 32.3 [1.3] | 26.0 [0.9] |
+| bidir, fast potentiation | 91.7 [1.6] | 91.7 [2.6] | 52.1 [2.1] | 36.5 [1.0] | 29.2 [0.5] |
+
+**3 actions, chance 33.3%**
+
+| rule | 4 | 8 | 16 | 32 | 64 |
+|---|---:|---:|---:|---:|---:|
+| depression only | 83.3 | 79.2 | 43.8 | 42.7 | 38.0 |
+| bidirectional | 100.0 | 91.7 | 64.6 | 52.1 | 45.8 |
+| bidir, fast potentiation | 100.0 | 95.8 | 72.9 | 54.2 | 47.4 |
+
+The mechanism check is that the **depressed fraction goes down** while
+accuracy goes up -- 3.6% to 2.6% at eight associations. The circuit is not
+storing more by writing more, it is storing more by writing reversibly, and
+so it stops pinning synapses at the floor. That also distinguishes this from
+interference at the MBON level, which would have shown more writing for the
+same discrimination.
+
+This is the animal's own arrangement: KC->MBON plasticity in *Drosophila* is
+bidirectional and timing-dependent. Depression-only was the simplification.
+
+### ...and it does not help the interception task at all
+
+Which was the point of doing it, and it failed:
+
+| rule | exact bin, 3 seeds | mean | within window |
+|---|---|---:|---:|
+| depression only | 36.0, 42.1, 41.7 | 39.9% | 31.3% |
+| bidirectional | 40.8, 41.3, 42.7 | 41.6% | 32.4% |
+| bidir, fast potentiation | 38.6, 42.6, 44.5 | 41.9% | 32.4% |
+
+Two points, inside the seed spread, from a change that doubles capacity on
+arbitrary patterns. The prediction made before running it -- that relieving
+the capacity limit would improve interception for free -- is wrong.
+
+The reason is a result that was already in hand and under-weighted:
+replacing the place codes with orthogonal patterns made interception *worse*
+(15.0% against 22.0%). The target is a smooth function of the inputs, so
+neighbouring situations have neighbouring answers, and overlapping place
+codes let the circuit store a smooth map rather than 64 unrelated facts.
+Overlap is load-bearing here. The capacity curve measures storage of
+arbitrary, mutually unrelated associations, and interception is not in that
+regime -- so relieving a limit it never hit changes nothing.
+
+What remains are two gaps, neither of them the plasticity rule. The fly
+reaches 39.9% against a 67.7% ceiling for its own encoding, so ~59% of what
+its representation permits; and the ceiling itself is set by the encoding,
+where `--levels 4` means ball height arrives as one of four values and the
+finest expressible answer is ~95 px wide. That same limit is what stops the
+mid-flight estimate sharpening below 85 px in the final quarter of the
+flight, where the answer should be nearly trivial.
+
+### Input resolution: the sensitivity argument is right and time-dependent
+
+The interception encoding quantises three channels at one shared resolution,
+and that looks wasteful: the landing point is fold(y + vy * t), so height
+enters with coefficient 1 while velocity enters multiplied by the time of
+flight. One step of vy should displace the answer ~150x further than one step
+of y, and resolution should follow sensitivity.
+
+The encoding ceiling can be evaluated without training anything -- bucket
+serves by quantised address, and for each address take the best single
+answer -- so the allocation is decidable in seconds. Measured that way, with
+the ball observed in the left half of the court, velocity-fine allocations
+dominate and height-fine ones collapse:
+
+| pos | vel | togo | possible | ceiling |
+|---:|---:|---:|---:|---:|
+| 4 | 4 | 4 | 64 | 49.8% |
+| 2 | 8 | 4 | 64 | 50.2% |
+| 16 | 2 | 2 | 64 | 36.3% |
+| 4 | 8 | 6 | 192 | 61.9% |
+| 48 | 2 | 2 | 192 | 37.1% |
+
+Trained, all of it fails. Within the catch window, 3 seeds each:
+
+| encoding | addresses | ceiling | within window |
+|---|---:|---:|---:|
+| uniform 4/4/4 | 64 | 48.0% | **23.8%** |
+| 2/8/4 | 48 | 43.1% | 21.6% |
+| 4/8/6 | 144 | 55.2% | 19.4% |
+| 4/8/6 + bidirectional | 144 | 55.2% | 19.4% |
+
+Two separate reasons, and the second one invalidates the analysis above.
+
+**Ceiling bought with addresses is not worth the price.** 4/8/6 raises the
+ceiling by 7 points and drops the fly from 50% of its ceiling to 35%, for a
+net loss. Bidirectional plasticity does not rescue it, which is consistent
+with interception not being capacity-limited in the first place.
+
+**The ceiling table was computed on the wrong distribution.** It sampled the
+ball in the left half; the task asks at moments spread across the whole
+flight. The sensitivity that motivates the whole idea is *time-dependent* --
+velocity dominates while the ball is far away, and height dominates once it
+is close, because at small t the answer simply is the current height.
+Averaged over a flight both matter, and a uniform split is near-optimal.
+Under the real distribution 2/8/4 scores 43.1%, *below* the uniform 48.0%,
+reversing the ordering that motivated trying it.
+
+The transferable lesson is the method, not the allocation: encoding ceilings
+are cheap to compute and worth computing before training anything -- and they
+have to be computed on the distribution the task will actually present.
+
 ### What the model leaves on the table
 
 Only 5 of the 20 mushroom-body pathways in `male-cns:v1.0` are modelled at
@@ -1137,3 +1584,307 @@ the substrate for a baseline. And the rule itself is depression-only with a
 floor, so the plastic budget is finite and visibly spends itself -- real
 KC->MBON plasticity is bidirectional and timing-dependent, and potentiation
 would roughly double what can be learned.
+
+## Sight to paddle: the optic flow system is the wrong readout (but see the correction at the end -- the columnar pathway works)
+
+The open experiment this repo kept pointing at -- run a visual stimulus in one
+end of the connectome and look for a motor command at the other -- is now
+run, for a vertically moving paddle. The answer is negative, and the reason is
+specific enough to be worth more than the attempt.
+
+The circuit is real: `retina -> L1/L2/L3/L5 -> Mi1/Mi4/Mi9, Tm1/Tm2/Tm9 ->
+T4a-d/T5a-d -> HS/VS/VST/VSm -> DNp20/DNg46/DNp17`, 31,384 neurons and
+598,792 synapses, with 87% of 7,114 input cells mapped to retinotopic columns
+through `assignedOlHex1/2`. DNa02, used earlier in this project, was the wrong
+target: it is the *yaw* command and takes only 138 synapses from HS. The
+vertical system drives DNp20 (1,526 synapses), DNg46 (1,063) and DNp17 (877).
+
+Ball elevation is represented. At a **fixed** azimuth the difference
+DNp20 - DNg46 reaches rho -0.83 against ball height, stable from 6
+integration steps out to 48, and 7 of 12 DNp17 cells individually exceed
+|rho| 0.8. The early stages are much stronger still -- L2 modulates 0.85
+against a blank field, ~100x the descending signal, which is what wide-field
+pooling does to a ball-sized stimulus.
+
+It still cannot steer a paddle, for one reason, measured three ways:
+
+| test | result | trivial baseline |
+|---|---:|---:|
+| population decode, azimuth held out | 97.7 px rms | 113.5 px |
+| population decode, full-field calibration | 75.7 px rms | 112.3 px |
+| retinal-offset fixation, eye on the paddle | sign reverses | -- |
+
+The third is the diagnostic one. Mounting the retina on the paddle makes
+retinal offset the error signal directly, so no position decode is needed and
+the descending neuron *is* the motor command. Calibrating that across the
+visual field gives per-azimuth correlations of **+0.16, -0.27, -0.67, -0.38,
++0.77**: the elevation response inverts depending on where the ball sits
+horizontally. No fixed gain, and no fixed *sign*, steers correctly across the
+court. The decode errors say the same thing more quietly -- 41 px at court
+centre rising to 121 px at both edges.
+
+This is not a modelling artefact, it is what the readout is for. VS has 34
+cells pooling roughly 892 retinotopic columns to estimate self-motion from
+wide-field optic flow; collapsing position is its function, not a limitation.
+Asking it for a position code was the error, and it took several experiments
+to see it because at fixed azimuth it answers convincingly.
+
+The connectome says where to look instead. LC -> DN is **158,312 synapses**
+against **3,466** for all of VS -> DN: the lobula columnar system, not the
+optic flow system, is the fly's descending visual drive, and it includes LC11,
+a small-object detector. Those are retinotopic arrays of 100-500 cells each,
+which is what a position code looks like. The catch is fan-out: 179 distinct
+DN cells receive LC input but no DN *type* has more than 4 of them, so any
+positional readout has to be assembled across types rather than taken from
+one.
+
+### The stimulus was not the problem, and a smaller ball is worse
+
+The visuomotor decode capped near 64 px at every stage including the
+retinotopic lamina, and one confound was left untested: the ball was rendered
+80 px across on a 409 px retina, ~20% of the visual field, where a real pong
+ball is 3.9% of the court. Five times oversized should blur the very quantity
+being decoded.
+
+It does not. Sweeping the ball's angular size, decoding elevation at each
+stage, trivial predictor 115.1 px:
+
+| radius | % of field | L2 | T2 | LC (all) | LC11 | DN (all) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4 | 2.0% | 118.9 | 113.3 | 84.9 | 78.5 | 116.1 |
+| 8 | 3.9% | 118.8 | 110.8 | 84.2 | 77.9 | 89.0 |
+| 15 | 7.3% | 103.7 | 96.9 | 81.2 | 76.4 | 80.6 |
+| 25 | 12.2% | 86.2 | 83.7 | 76.6 | 75.0 | 85.4 |
+| 40 | 19.6% | 76.1 | 74.4 | 70.9 | 69.7 | 72.4 |
+| 60 | 29.3% | 69.8 | 68.1 | 66.1 | 65.0 | 67.3 |
+
+Bigger is monotonically better. At a *realistic* ball size -- 3.9% of the
+field -- the retinotopic lamina decodes at 118.8 px, which is no better than
+predicting the mean. The oversized stimulus was helping, not hurting.
+
+The limit is signal, not blur. A ball spanning one or two of the ~892
+columns cannot produce a differential response a linear readout can pull
+out; a large one drives many columns and its centroid is still perfectly
+well defined. So the sight-to-paddle negative stands with its last confound
+ruled out rather than assumed away: even a ball covering 29% of the visual
+field decodes to 65 px against a 48 px catch window.
+
+One detail worth keeping. **LC11 is the best decoder at every radius**
+(78.5 px down to 65.0 px), beating both the full 3,206-cell LC population
+and the 1,310-cell descending population with 143 cells. The connectome's
+small-object detector is in fact the best small-object localiser in the
+circuit, which is independent evidence that these type labels carry real
+functional content.
+
+### The motion pathway was never shown motion, and it does not help
+
+Every visuomotor probe here used a *static* frame settled from rest. That was
+noted as a reason the vertical system failed -- T4 and T5 are
+correlation-type detectors and a stationary object gives them nothing to
+report -- and then not tested. So: a moving ball, frames following a real
+trajectory, membrane state persisting between them, each trajectory paired
+with a static presentation of its own final frame integrated for the same
+number of steps. The only difference between the pair is whether the
+preceding frames moved.
+
+The first attempt found nothing, and the reason was mine: `tau=2.0` with six
+integration steps per frame leaves `exp(-6/2)` = 5% of the state alive
+between frames, so the network re-equilibrates from near-rest on every frame
+and has no memory for a velocity computation to use. Sweeping the time
+constant so that 5%, 82% and 90% of the state survives a frame:
+
+| state surviving a frame | 5% | 82% | 90% |
+|---|---:|---:|---:|
+| T5c moving-vs-static difference | 0.05% | 0.03% | 0.01% |
+| vertical velocity decode (trivial 2.04 px/frame) | 2.17 | 2.17 | 1.98 |
+
+Motion changes the response by hundredths of a percent, and the difference
+*shrinks* as temporal memory grows. Velocity never beats the trivial
+predictor at any setting. So the pathway does not encode motion, and not
+because it was starved of memory -- giving it more memory made the motion
+response smaller.
+
+That is consistent with the direction-selectivity result recorded earlier:
+`x <- x + (dt/tau)(-x + Wr + b + u)` with a monotone nonlinearity is a leaky
+*sum*, and a Reichardt detector needs the delayed and undelayed arms
+*multiplied*. A population with a spread of time constants can encode
+velocity linearly without any product -- a fast trace of position minus a
+slow one -- which is why this was worth testing rather than assuming. It does
+not, so the missing operation really is the product, now checked across an
+18x range of time constants rather than at one.
+
+**Caveat worth keeping.** The first run of this test appeared to be a clean
+null across four time constants and was actually one time constant run four
+times: a patch written to Python's `/tmp` (which is `	mp` on Windows) never
+reached the file the shell had written. What gave it away was the
+moving-vs-static deltas agreeing to six decimal places, which four genuinely
+different parameter settings do not do. Identical numbers across conditions
+are worth more suspicion than surprising ones.
+
+### Three measurement bugs, in my own diagnostics
+
+Worth recording because the pattern is now four for four in this project: a
+broken measurement looks exactly like a legitimate negative result.
+
+1. **Selecting by correlation, reporting magnitude.** The staged probe picked
+   each stage's most height-correlated cell and then printed *that cell's*
+   response size, so a perfectly ordered 1e-8 response outranked a large,
+   nearly ordered one. Every early stage read as silent.
+2. **Reading a vertical signal as a left-right asymmetry.** Correct for yaw,
+   and exactly wrong here: both eyes see the ball at the same elevation, so
+   the signal is common-mode and subtracting the sides cancels it.
+3. **Sweeping calibration heights through persistent state.** Each reading
+   carried the membrane state left from the previous height, which turned rho
+   -0.83 into rho -0.027 and a spurious inverted-U tuning curve. I explained
+   that curve as a settling transient before checking, and it was not: varying
+   integration time alone leaves the tuning stable from 6 steps to 48.
+
+What caught all three was instrumenting the mechanism rather than the score --
+the same lesson as the parked paddle, the potentiation eraser and the starved
+trace.
+
+### Extraction no longer goes through a dense matrix
+
+`build()` constructed an (n, n) float32 and called `np.nonzero` on it. That is
+3.9 GB for the 31k-neuron vertical circuit and 11.4 GB for the 53k-neuron
+columnar one, so the experiment above could not have been run at all.
+`local_data.circuit_edges()` builds the edge list directly and costs memory
+proportional to synapses instead. Verified edge-for-edge identical to the
+dense path on three circuits up to 18,900 neurons and 327,651 edges, including
+the two quirks that had to be preserved -- assignment rather than accumulation
+on repeated (pre, post) pairs, and `np.nonzero` ordering. The connectome table
+turns out to have no repeated pairs, so the first quirk is moot in practice.
+`circuit_weight_matrix()` is unchanged, since `fetch-optomotor` exports the
+matrix itself.
+
+## Correction: the visual pathway does localise the ball, and rms hid it
+
+Every number in the visuomotor sections above is a root-mean-square error in
+pixels, and rms was the wrong statistic. The game does not score distance, it
+scores interception, and the error distribution is nothing like Gaussian.
+
+Same cached responses, same cross-validated decode, scored as *would the
+paddle have caught it* -- ball within the paddle's half-height of the
+estimate:
+
+| population | cells | rms | median | **hit rate** |
+|---|---:|---:|---:|---:|
+| L2 | 1,779 | 64.8 px | 19.4 px | 75.6% |
+| T2 | 1,630 | 65.3 px | 17.4 px | 80.0% |
+| LC (all) | 3,206 | 62.7 px | 15.9 px | 83.0% |
+| LC11 | 143 | 62.9 px | 14.7 px | **84.4%** |
+| DN (all) | 1,310 | 63.8 px | 16.1 px | **84.4%** |
+| paddle parked at centre | -- | -- | -- | 20.0% |
+
+The descending population localises the ball well enough to intercept 84.4%
+of the time. The reason rms said otherwise:
+
+| percentile | 10th | 25th | 50th | 75th | 90th |
+|---|---:|---:|---:|---:|---:|
+| error (LC11) | 0.9 px | 2.8 px | 7.8 px | 19.0 px | 119.2 px |
+
+Median error is 7.8 px on a 460 px court. The decode is excellent for about
+three quarters of positions and fails badly for the last ten to fifteen
+percent, and squaring the errors reports the tail while hiding the centre.
+Every "~60 px floor, wider than the 48 px catch window" claim above is that
+artefact, repeated across four pathways because the same statistic was used
+each time.
+
+What survives from those sections, and what does not:
+
+* **Survives.** The optic flow system really is the wrong readout -- its
+  elevation response inverts across azimuth, which is a sign error, not a
+  magnitude one. LC11 really is the best localiser in the circuit. The motion
+  pathway really does carry no motion. The central complex really is worse
+  than the columnar pathway at both axes.
+* **Does not survive.** "The pathway does not carry ball height at usable
+  precision", and every conclusion built on it, including the claim that the
+  sight-to-paddle experiment fails. It does not fail.
+
+The remaining question is the tail, not the centre: what makes 10-15% of
+positions decode catastrophically while the rest land within 20 px. That is a
+different and much more tractable problem than a uniform floor, and it was
+invisible for as long as the metric averaged over it.
+
+## A fly that plays pong by looking at it
+
+`flybrain see-pong` drives a paddle from a connectome visual pathway and
+nothing else:
+
+    ball on screen -> retinotopic columns -> lamina -> medulla -> LC11
+      -> decoded elevation -> paddle
+
+No mushroom body, no plasticity, no coordinates. 10,827 neurons, and the
+readout is the 143 LC11 cells -- the small-object detector, which is the best
+localiser in the circuit at every stimulus size tested, beating both the
+3,206-cell LC population and all 1,310 descending neurons.
+
+| | |
+|---|---:|
+| balls returned | **93%** |
+| paddle parked, same serves | 16% |
+| estimate error | 10.9 px median, on a 460 px court |
+| per-quarter of a 100-ball session | 92% / 92% / 92% / 96% |
+
+The front end barely matters: `full` (49,005 neurons), `trimmed` (18,145) and
+`minimal` (10,827) all decoded identically, and the same 21 of 135 grid
+positions failed in each -- which points at a blind region rather than noise,
+most likely the top and bottom of the visual field where few columns see the
+ball. `minimal` is the default because it is the cheapest and has the lowest
+median error.
+
+The honest caveat: the decode is a kernel regression fitted offline, so the
+*information* is the connectome's and the *extraction* is not the fly's.
+`BrainNet` is differentiable and `readout_rate` gives a reward-driven output
+map; neither is used here.
+
+### Eight ways to measure this wrong, and one lesson
+
+Every number this project reported about the visual pathway before the last
+day was wrong, and in a way that is worth more than the result. Two families.
+
+**The metric.** Root-mean-square error in pixels, used everywhere, on a
+distribution with a tight centre and a heavy tail:
+
+| percentile | 10th | 25th | 50th | 75th | 90th |
+|---|---:|---:|---:|---:|---:|
+| error (LC11) | 0.9 px | 2.8 px | 7.8 px | 19.0 px | 119.2 px |
+
+Squaring reports the tail and hides the centre, so 7.8 px median read as a
+63 px floor. The game does not score distance, it scores interception; asking
+"would the paddle have caught it" turned the same data from a hopeless floor
+into 84%. The metric was chosen once, early, and reused across four pathways
+and two days without ever being checked against the task.
+
+**The regime.** Six separate instances of one mistake -- fit in one regime,
+run in another:
+
+| fitted on | run in | symptom |
+|---|---|---|
+| stimuli settled from rest | persistent membrane state | 906 px decode error |
+| single left-to-right flights | rallies with outbound travel | 10 px held out, 96 px in play |
+| frames split at random | held-out *balls* | 99.9% for a decode reading its own neighbour |
+| a perfect paddle returning every ball | the decode driving the paddle | 99% held out, 128 px in play |
+| ~30-ball calibration runs | 100-ball sessions | 80% first quarter, 8% last |
+| an opponent returning dead centre | a human hitting off centre | solid until the ball reached a wall |
+
+Each was found the same way: an implausible number that had no business
+being what it was. Identical deltas to six decimal places across four
+conditions. A median that repeated across three configurations. 99.9% on a
+task that is not easy. `depressed` at 0.0%. A 906 px error on a 460 px court.
+
+Two of them are general enough to state as rules.
+
+**The calibration distribution is set by every agent in the loop, not just
+the one being calibrated.** Correcting for the fly's own paddle -- collecting
+training data with the decode driving, three rounds of it -- took the hit
+rate from 35% to 67.5%. Leaving the *opponent* perfect then silently removed
+wall bounces from the training set, and that was only found by a human
+playing the game.
+
+**A recurrent circuit's state is part of the regime.** The membrane state was
+carried for a whole session while calibration never ran more than ~30 balls.
+Resetting between balls, and calibrating the same way, took 37% to 93% and
+flattened the decline entirely. This is the same error as the others, along
+the time axis instead of the stimulus axis, and it was worth 56 points.
+

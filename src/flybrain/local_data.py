@@ -117,6 +117,64 @@ def _body_column(frame: pd.DataFrame) -> str:
     raise KeyError(f"No body-id column found in: {list(frame.columns)}")
 
 
+def circuit_neurons(types: list[str], *, regex: bool = True) -> pd.DataFrame:
+    """The annotation rows for every neuron of the given cell types."""
+    ann = annotations()
+    type_col = _type_column(ann)
+
+    pattern = "|".join(f"(?:{t})" for t in types) if regex else None
+    if regex:
+        mask = ann[type_col].astype(str).str.fullmatch(pattern, na=False)
+    else:
+        mask = ann[type_col].isin(types)
+    neurons = ann[mask].reset_index(drop=True)
+    if neurons.empty:
+        raise SystemExit(f"No neurons matched {types}")
+    return neurons
+
+
+def circuit_edges(
+    types: list[str],
+    *,
+    regex: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
+    """Signed edge list for every neuron of the given cell types.
+
+    Same model and same assumptions as `circuit_weight_matrix`, but never
+    materialises the (n, n) matrix -- which is 3.9 GB at 31k neurons and 11 GB
+    at 53k, and was the reason a whole-optic-lobe circuit would not build on a
+    laptop. Cost here is proportional to the number of synapses instead.
+
+    Returns (pre, post, weight, neurons) with edges sorted by (pre, post),
+    zero weights dropped, matching what `np.nonzero` gave on the dense matrix.
+    """
+    neurons = circuit_neurons(types, regex=regex)
+    body_col = _body_column(neurons)
+    index = {bid: i for i, bid in enumerate(neurons[body_col])}
+
+    sub = weights_between(neurons[body_col].tolist())
+    pre_col = next(c for c in sub.columns if "pre" in c.lower())
+    post_col = next(c for c in sub.columns if "post" in c.lower())
+    weight_col = next(
+        c for c in sub.columns if c.lower() in ("weight", "count", "syn_count")
+    )
+
+    signs = _signs(neurons[body_col])
+    pre = sub[pre_col].map(index).to_numpy(dtype=np.int64)
+    post = sub[post_col].map(index).to_numpy(dtype=np.int64)
+    weight = sub[weight_col].to_numpy(dtype=np.float32) * signs[pre]
+
+    # The dense path assigned rather than accumulated, so a repeated (pre,
+    # post) pair kept its last value. Reproduce that, then sort as nonzero
+    # did, so circuits extracted either way are identical.
+    order = np.lexsort((post, pre))
+    pre, post, weight = pre[order], post[order], weight[order]
+    keep = np.ones(len(pre), dtype=bool)
+    keep[:-1] = (pre[:-1] != pre[1:]) | (post[:-1] != post[1:])
+    keep &= weight != 0
+    return pre[keep], post[keep], weight[keep], neurons
+
+
 def circuit_weight_matrix(
     types: list[str],
     *,

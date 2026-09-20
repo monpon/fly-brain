@@ -74,10 +74,14 @@ class Drill:
                 bidirectional=a.bidirectional,
                 gain_ceiling=a.gain_ceiling,
                 readout_rate=a.readout_rate,
+                mbon_dan=a.mbon_dan,
             ),
         )
         self.n_pn = mb.n("PN")
-        self.third = self.n_pn // 3
+        # Four channels in predict mode, three otherwise. Each gets an equal
+        # slice of the projection neurons.
+        self.chan = self.n_pn // (4 if a.predict else 3)
+        self.third = self.chan          # kept for the place-code helper
         N = a.flies
         d = self.device
 
@@ -94,6 +98,9 @@ class Drill:
         self.vx = torch.empty(N, device=d)
         self.vy = torch.empty(N, device=d)
         self._serve(torch.ones(N, device=d, dtype=torch.bool))
+        # Running sums for the tracking-vs-predicting diagnostic.
+        self.err_now = self.err_hit = self.lead_sum = 0.0
+        self.lead_n = 0
 
     def _rand(self, n):
         return self.torch.rand(n, generator=self.gen, device=self.device)
@@ -119,8 +126,31 @@ class Drill:
         centre = ((value.clamp(-1, 1) * 0.5 + 0.5) * (span - 1)).unsqueeze(1)
         return self.a.pn_gain * torch.exp(-0.5 * ((idx - centre) / width) ** 2)
 
+    def intercept(self):
+        """Where the ball will cross the paddle plane, with wall bounces.
+
+        Closed form, not a simulation: extrapolate to the paddle plane, then
+        fold the result back into the court with a triangle wave, which is
+        what perfectly elastic walls do to a straight line.
+
+        Used for the reward and the diagnostics in `--predict`. It is never
+        an input -- handing the fly the answer would make this supervised
+        learning with extra steps.
+        """
+        torch = self.torch
+        span = H - 2 * BALL
+        t = (self.paddle_x - BALL - self.bx) / self.vx.clamp(min=1e-6)
+        y = (self.by + self.vy * t - BALL) % (2 * span)
+        return torch.where(y > span, 2 * span - y, y) + BALL
+
     def sense(self):
-        """Ball position, ball velocity, paddle position. Three channels."""
+        """What the fly is given. Three channels, or four with --predict.
+
+        Ball *x* is the addition, and it is not decoration: without it there
+        is no time-to-arrival, so the intercept is not a function of the
+        inputs and no reward could ever teach the fly to aim at it. With it,
+        position + velocity + time is enough to compute one.
+        """
         torch = self.torch
         span_y = (H - 2 * BALL) / 2
         pad_span = (H - PAD_H) / 2
@@ -129,9 +159,14 @@ class Drill:
             self._place_code(self.vy / max(self.max_vy, 1e-6), 5.0),
             self._place_code((self.y - H / 2) / pad_span, 5.0),
         ]
+        if self.a.predict:
+            reach = self.paddle_x - MARGIN
+            parts.append(self._place_code(
+                (self.bx - MARGIN) / reach * 2 - 1, 5.0))
+
         pn = torch.zeros(self.a.flies, self.n_pn, device=self.device)
         for i, part in enumerate(parts):
-            pn[:, i * self.third:(i + 1) * self.third] = part
+            pn[:, i * self.chan:(i + 1) * self.chan] = part
         return pn
 
     def step(self, explore: float):
@@ -140,7 +175,13 @@ class Drill:
         _, _, drives = self.brain.observe(self.sense())
         actions, _ = self.brain.choose(drives, explore)
 
-        gap_before = (self.by - self.y).abs()
+        # In predict mode the target is where the ball is *going*, which is
+        # the whole difference. Rewarding progress toward the ball's current
+        # position is what produced a pure tracker: measured, the paddle sat
+        # 6.1 px from the ball and 137.4 px from the intercept, with a lead
+        # fraction of -0.04.
+        target = self.intercept() if self.a.predict else self.by
+        gap_before = (target - self.y).abs()
         move = torch.tensor(MOVE, device=self.device)[actions]
         self.y = (self.y + move * self.a.fly_speed).clamp(PAD_H / 2,
                                                           H - PAD_H / 2)
@@ -158,7 +199,7 @@ class Drill:
             #
             # STAY leaves the gap unchanged, so it earns nothing either way
             # and is masked out rather than being scored as a failure.
-            delta = gap_before - (self.by - self.y).abs()
+            delta = gap_before - (target - self.y).abs()
             outcome = torch.sign(delta)
             self.brain.reinforce(actions, outcome, outcome != 0)
             self.brain.reset_trace()
@@ -168,6 +209,20 @@ class Drill:
         bounced = (self.by < BALL) | (self.by > H - BALL)
         self.vy = torch.where(bounced, -self.vy, self.vy)
         self.by = self.by.clamp(BALL, H - BALL)
+
+        if self.a.predict:
+            # Sampled after the move, on inbound frames only.
+            tgt = self.intercept()
+            gap_ball = (self.by - self.y).abs()
+            spread = (tgt - self.by).abs()
+            ok = spread > 1e-6
+            if bool(ok.any()):
+                lead = torch.sign(tgt - self.by) * (self.y - self.by) / \
+                    spread.clamp(min=1e-6)
+                self.lead_sum += float(lead[ok].sum().item())
+                self.err_now += float(gap_ball[ok].sum().item())
+                self.err_hit += float((tgt - self.y).abs()[ok].sum().item())
+                self.lead_n += int(ok.sum().item())
 
         arrived = self.bx >= self.paddle_x - BALL
         if not bool(arrived.any()):
@@ -223,6 +278,20 @@ def main(a) -> int:
                   f"{time.perf_counter()-t0:8.0f}s")
             next_report += a.every
 
+    if drill.lead_n:
+        # The question this mode exists to answer. A tracker sits on the
+        # ball; a predictor sits on the intercept. Lead fraction is 0 for the
+        # first and 1 for the second, so it separates them directly rather
+        # than inferring from the hit rate.
+        print(f"\ntracking or predicting?")
+        print(f"  mean |paddle - ball now|       "
+              f"{drill.err_now / drill.lead_n:7.1f} px")
+        print(f"  mean |paddle - true intercept| "
+              f"{drill.err_hit / drill.lead_n:7.1f} px")
+        print(f"  lead fraction                  "
+              f"{drill.lead_sum / drill.lead_n:+7.3f}   "
+              f"(0 = on the ball, 1 = on the intercept)")
+
     rates = (drill.hits / drill.balls.clamp(min=1)).cpu().numpy()
     total_hits = int(drill.hits.sum().item())
     total_balls = int(drill.balls.sum().item())
@@ -261,9 +330,18 @@ if __name__ == "__main__":
     ap.add_argument("--lateral", type=float, default=0.0)
     ap.add_argument("--bidirectional", action="store_true")
     ap.add_argument("--gain-ceiling", type=float, default=1.0)
+    ap.add_argument("--predict", action="store_true",
+                    help="aim at where the ball will arrive, not where it "
+                         "is: adds ball x as a fourth channel and rewards "
+                         "progress toward the computed intercept. Pair with a "
+                         "--fly-speed low enough that tracking cannot keep up")
     ap.add_argument("--dense", action="store_true",
                     help="reinforce every frame on whether the move closed "
                          "the gap, instead of once per ball on the outcome")
+    ap.add_argument("--mbon-dan", type=float, default=0.0,
+                    help="MBON->DAN feedback: turns the outcome into a "
+                         "prediction error. 1.0 cancels ~20%% of the dopamine "
+                         "once a memory has formed")
     ap.add_argument("--readout-rate", type=float, default=0.0)
     ap.add_argument("--pn-gain", type=float, default=30.0)
     ap.add_argument("--fly-speed", type=float, default=7.0)

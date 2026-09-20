@@ -140,6 +140,31 @@ class LearningParams:
     readout_rate: float = 0.0
     readout_trace_tau: float = 0.0     # 0 follows trace_tau
 
+    # -- MBON -> DAN feedback ---------------------------------------------
+    # 11,020 synapses in male-cns that the model has never used. MBONs
+    # synapse back onto the dopaminergic neurons that write to them, and the
+    # loop is what lets the teaching signal depend on what the circuit
+    # already predicts rather than only on what just happened.
+    #
+    # Most MBONs are inhibitory, so a stimulus the animal has already learned
+    # about drives its MBONs, which suppress their own DANs, which cancels
+    # the dopamine. That is a prediction error rather than a raw outcome, and
+    # it is the one mechanism here with a principled answer to the problem
+    # sparse reward actually has: one scalar per episode carries almost no
+    # information *because nothing subtracts what was expected*. Lengthening
+    # traces and adding potentiation redistribute variance; a baseline
+    # reduces it.
+    #
+    # It also predicts extinction and blocking, which are real behaviours
+    # this model cannot currently produce at all.
+    #
+    # Scaled against a measured reference (`FlyBrain._mbon_scale`) so that
+    # 1.0 means "feedback comparable to the outcome it modulates". Without
+    # that division the gain carried a ~20x unit conversion -- MBON rates run
+    # around 0.05 against a raw DAN activity of 1.0 -- and the useful range
+    # sat near 100, which made the parameter unreadable.
+    mbon_dan: float = 0.0
+
     def __post_init__(self) -> None:
         if not 0.0 < self.kc_sparsity <= 1.0:
             raise ValueError("kc_sparsity must be in (0, 1]")
@@ -210,6 +235,7 @@ class FlyBrain:
         # terminals. Normalised per postsynaptic cell so the recurrent input
         # is comparable to the feedforward drive rather than swamping it.
         self.w_mbon_mbon = self._recurrent(getattr(mb, "W_mbon_mbon", None))
+        self.w_mbon_dan = self._feedback(getattr(mb, "W_mbon_dan", None))
 
         # PN -> KC drive, likewise normalised per Kenyon cell.
         pn_kc = mb.W_pn_kc.astype(np.float64)
@@ -467,6 +493,61 @@ class FlyBrain:
                           where=total > 0)
         return (W * scale[np.newaxis, :]).astype(np.float32)
 
+    def _mbon_scale(self) -> float:
+        """Typical MBON response magnitude for this circuit.
+
+        MBON rates land around 0.05 while raw DAN activity is 1.0, so a
+        feedback gain expressed in raw units carries a ~20x unit conversion
+        and `mbon_dan=1` does nothing while `mbon_dan=200` does everything.
+        Dividing by a measured reference makes the parameter mean what it
+        says: 1.0 is feedback comparable to the outcome it modulates.
+
+        Measured once, from the anatomy, on sparse stimuli with a fixed seed
+        -- so it is deterministic and does not drift as the fly learns. The
+        reference is the *untrained* scale on purpose: it should not move
+        under the fly's feet while it is being trained.
+        """
+        cached = getattr(self, "_mbon_ref", None)
+        if cached is not None:
+            return cached
+        rng = np.random.default_rng(0)
+        n_pn = self.w_pn_kc.shape[0]
+        active = max(1, int(0.15 * n_pn))
+        gain, self.state.gain = self.state.gain, np.ones_like(self.state.gain)
+        try:
+            peaks = []
+            for _ in range(16):
+                pn = np.zeros(n_pn, dtype=np.float32)
+                pn[rng.choice(n_pn, active, replace=False)] = 30.0
+                peaks.append(np.abs(self.mbon_rates(
+                    self.kenyon_cells(pn))).mean())
+        finally:
+            self.state.gain = gain
+        self._mbon_ref = float(np.mean(peaks)) or 1.0
+        return self._mbon_ref
+
+    def _feedback(self, W) -> np.ndarray | None:
+        """Sign and normalise MBON -> DAN, or None if it was not extracted.
+
+        Signed by the *presynaptic* MBON's transmitter, so the arithmetic is
+        just addition: an inhibitory MBON carries a negative weight and
+        therefore lowers its DAN's activity. Nothing here has to decide that
+        prediction should suppress dopamine -- the anatomy already says so,
+        because most MBONs are inhibitory.
+        """
+        n_dan = len(self.mb.dan_valence)
+        if W is None or np.size(W) == 0 or W.shape != (self.n_mbon, n_dan):
+            return None
+        signs = np.asarray(self.mb.mbon_sign, dtype=np.float32)
+        if signs.size != self.n_mbon:
+            signs = np.ones(self.n_mbon, dtype=np.float32)
+
+        W = np.asarray(W, dtype=np.float64) * signs[:, np.newaxis]
+        total = np.abs(W).sum(axis=0)
+        scale = np.divide(1.0, total, out=np.zeros_like(total),
+                          where=total > 0)
+        return (W * scale[np.newaxis, :]).astype(np.float32)
+
     def reset_state(self) -> None:
         self.state = self.fresh_state()
         self._trace[:] = 0.0
@@ -639,7 +720,18 @@ class FlyBrain:
         if not update:
             return out
 
-        da = self.dopamine(self.dan_activity(reward=reward, punishment=punishment))
+        dan = self.dan_activity(reward=reward, punishment=punishment)
+        if p.mbon_dan > 0.0 and self.w_mbon_dan is not None:
+            ref = self._mbon_scale()
+            # What the circuit already predicts, fed back onto the neurons
+            # that teach it. `dan_activity` is the raw outcome; this makes it
+            # an error. A stimulus the fly has learned about drives MBONs that
+            # inhibit their own DANs, the dopamine cancels, and learning stops
+            # of its own accord instead of spending the plastic budget
+            # re-writing a memory that is already there.
+            dan = np.maximum(
+                dan + p.mbon_dan * (mbon @ self.w_mbon_dan) / ref, 0.0)
+        da = self.dopamine(dan)
         # Dopamine is compartment-specific in the animal: a DAN floods the
         # compartment it innervates and no other. `mbon_mask` restricts it
         # further, to the compartments read by one behavioural channel, which

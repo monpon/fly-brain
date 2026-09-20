@@ -127,14 +127,13 @@ def build(types: list[str], inputs: list[str], outputs: list[str],
 
     from . import local_data as L
 
-    W, neurons = L.circuit_weight_matrix(types, regex=regex)
+    # Sparse: the dense (n, n) matrix this used to go through is 3.9 GB at
+    # 31k neurons and would be 11 GB for a whole optic lobe.
+    pre, post, weight, neurons = L.circuit_edges(types, regex=regex)
     body_col = L._body_column(neurons)
     type_col = L._type_column(neurons)
     body_ids = neurons[body_col].to_numpy(dtype=np.int64)
     type_names = neurons[type_col].astype(str).to_numpy()
-
-    pre, post = np.nonzero(W)
-    weight = W[pre, post].astype(np.float32)
 
     def match(patterns) -> np.ndarray:
         pat = "|".join(f"(?:{p})" for p in patterns)
@@ -149,8 +148,8 @@ def build(types: list[str], inputs: list[str], outputs: list[str],
     return Circuit(
         body_ids=body_ids,
         types=type_names,
-        pre=pre.astype(np.int64),
-        post=post.astype(np.int64),
+        pre=pre,
+        post=post,
         weight=_normalise(pre, post, weight, len(body_ids), budget),
         raw_weight=weight,
         input_idx=match(inputs),
@@ -255,7 +254,19 @@ class BrainNet:
 
         self.circuit = circuit
         self.steps = steps
+        # A scalar, or a {cell-type regex: tau} mapping for per-neuron
+        # dynamics. The distinction matters for anything temporal: with one
+        # tau for every cell, every path of the same synaptic length arrives
+        # at the same time, and a delay-and-correlate has no delay. T4
+        # direction selectivity is built out of Mi1 arriving fast against Mi4
+        # and Mi9 arriving late, so a single tau makes it unbuildable --
+        # measured, DSI came out at 1e-5 for all eight T4/T5 subtypes.
+        #
+        # Which cell is the slow arm is physiology, not anatomy. The EM volume
+        # says Mi9 contacts T4; it cannot say Mi9 is the delayed one. This is
+        # the seam where a measured number has to be supplied.
         self.tau = tau
+        self.tau_vec = self._tau_per_neuron(tau, circuit)
         self.dt = dt
         self.rate_name = rate
         self.rmax = rmax
@@ -282,6 +293,41 @@ class BrainNet:
                                   requires_grad=True)
 
     # -- forward ----------------------------------------------------------
+
+    def _k(self):
+        """The integration constant dt/tau, scalar or one value per neuron."""
+        if self.tau_vec is None:
+            return self.dt / self.tau
+        cached = getattr(self, "_k_cache", None)
+        if cached is None:
+            cached = self._tensor(self.dt / self.tau_vec)
+            self._k_cache = cached
+        return cached
+
+    @staticmethod
+    def _tau_per_neuron(tau, circuit):
+        """Resolve `tau` to a per-neuron array, or None if it is one number.
+
+        `tau` may be a float, or a mapping of cell-type regex to time
+        constant: `{"Mi1": 1.0, "Mi9": 10.0, "*": 2.0}`. Patterns are matched
+        in order against each neuron's type, first hit wins, and `"*"` is the
+        fallback.
+        """
+        if not isinstance(tau, dict):
+            return None
+        import re
+
+        types = circuit.types.astype(str)
+        default = float(tau.get("*", 2.0))
+        out = np.full(len(types), default, dtype=np.float32)
+        assigned = np.zeros(len(types), dtype=bool)
+        for pattern, value in tau.items():
+            if pattern == "*":
+                continue
+            hit = np.array([bool(re.fullmatch(pattern, t)) for t in types])
+            out[hit & ~assigned] = float(value)
+            assigned |= hit
+        return out
 
     def rate(self, v):
         """Voltage to firing rate.
@@ -342,7 +388,7 @@ class BrainNet:
         x = torch.zeros(batch, n, device=self.device)
         r = self.rate(x)
         history = []
-        k = self.dt / self.tau
+        k = self._k()
         for _ in range(self.steps):
             contrib = r[:, self.pre] * w
             drive = torch.zeros(batch, n, device=self.device)
@@ -379,7 +425,7 @@ class BrainNet:
 
             v = torch.zeros(x.shape[0], n, device=self.device)
             r = self.rate(v)
-            k = self.dt / self.tau
+            k = self._k()
             history = []
             for _ in range(self.steps):
                 drive = torch.zeros(x.shape[0], n, device=self.device)

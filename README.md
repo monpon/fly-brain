@@ -205,8 +205,52 @@ wiring alone. No matched whole-CNS pair existed before this dataset.
 **Vision all the way down**
 flyvis stops at optic lobe output — it predicts neural activity, not behavior.
 The male CNS includes optic lobes *and* VNC, so photoreceptors → leg motor
-neurons is now one continuous graph. Nobody has run a visual stimulus in one
-end and looked for a motor pattern at the other.
+neurons is now one continuous graph.
+
+That experiment has now been run here, and it **works well enough to play
+against**. `flybrain see-pong` puts a ball on a retina and drives a paddle
+from what comes out of the lobula: **93% of balls returned**, against 16% for
+a paddle that never moves, with the fly's estimate landing 10.9 px from the
+ball on a 460 px court.
+
+    ball on screen → retinotopic columns → lamina → medulla → LC11
+      → decoded elevation → paddle
+
+There is no mushroom body in it, no plasticity, and no coordinates handed
+over — only 10,827 connectome neurons and the 143 LC11 cells that report
+where the ball is. For comparison, the mushroom-body fly in the same game
+returns ~95% while being *told* `ball_y` through olfactory projection
+neurons.
+
+Getting there took eight measurements that were each wrong in the same way,
+and they are worth more than the result. The first was the metric: every
+early number was root-mean-square error, and the error distribution has a
+tight centre with a heavy tail — 7.8 px median, 119 px at the 90th
+percentile. Rms squares the errors, so it reported the tail and hid the
+centre, and a working readout read as a hopeless ~60 px floor across four
+different pathways.
+
+The rest were all one mistake: **fit in one regime, run in another.** A
+decode fitted on stimuli settled from rest read 906 px in a loop that carries
+membrane state. One fitted on single flights read 10 px held out and 96 px in
+rallies. One fitted while a perfect paddle returned every ball read 99% and
+128 px, because a decode changes the trajectories it then has to handle.
+Cross-validating by frame instead of by ball reported 99.9% for a decode
+reading its own neighbour. Carrying membrane state across a session the
+calibration never spanned turned 90% into 8% by the fourth quarter. And
+calibrating against an opponent that returned every ball dead centre removed
+wall bounces from the training set entirely — found by a human playing it,
+the one opponent that had not been simulated.
+
+What survives from the negatives: the optic *flow* system really is the wrong
+readout — VS pools ~892 retinotopic columns onto 34 cells and its elevation
+response inverts across azimuth, which is a sign error rather than a
+magnitude one. The motion pathway really does carry no motion, across an 18×
+range of membrane time constants, because a leaky sum cannot form the
+Reichardt product. And LC11 really is the best localiser in the circuit — 143
+cells matching all 1,310 descending neurons and beating the 3,206-cell LC
+population, which is independent evidence that these type labels carry
+functional content. See [docs/FINDINGS.md](docs/FINDINGS.md).
 
 ---
 
@@ -367,6 +411,12 @@ Against a returner that never misses, 200 balls:
 | sparse: one bit per rally, ~137 decisions later | 92.0% |
 | **dense: was that move toward the ball** | **100.0%** |
 
+Measured in continuous rallies, where a ball only reaches the fly if it
+returned the last one — so the sample leans on its own success. The same
+conditioning inflated this project's aiming numbers by ~17 points, and the
+flight-matched re-measurement of these figures is still outstanding. See
+[docs/FINDINGS.md](docs/FINDINGS.md).
+
 For most of this project's history this read ~21% and the notes said sparse
 reward could not work. That was wrong, and it was a bug rather than a
 finding: an uncentred readout gave one action a constant advantage, so the
@@ -390,15 +440,69 @@ derivable.
 
 What reinforcement teaches well is single decisions. `flybrain teach` maps
 six real odours onto three actions at **100%, on all 64 flies**, and still
-holds 32 arbitrary associations at twice chance. See
+holds 32 arbitrary associations at twice chance.
+
+`flybrain intercept` asks the harder question — shown the ball at an
+arbitrary moment in its flight, name the slice of court it will arrive in —
+and separates the guess from the execution, which every hit rate confounds.
+The guess is real: **40.7%** against a 30.7% always-one-bin baseline over
+five seeds, and the estimate sharpens as the ball closes, from 116 px of
+error to 77 px. It is also not enough, because 77 px exceeds the 48 px catch
+window. Neither credit assignment, association capacity, input resolution nor
+readout precision is the limit — each was tested and none moved it.
+
+`flybrain train-aim-gpu` runs that task for 128 flies at once, which matters
+more than speed: the same configuration spans 25–48% across single seeds, so
+point estimates from one fly are noise. See
 [docs/FINDINGS.md](docs/FINDINGS.md).
+
+### ...and against one that can actually see it
+
+Every pong above hands the fly numbers: `pong.py` place-codes ball_y, ball_vy,
+paddle_y and ball_x into 276 *olfactory* projection neurons, and the mushroom
+body learns an odour-to-action association we relabel as playing. It works,
+and the fly is not seeing anything.
+
+```bash
+flybrain see-pong --pad-speed 9999 --reset-on-serve --frame-ms 20
+```
+
+This one has no mushroom body in it. A disc is drawn where the ball is, fed
+into the photoreceptor-mapped input of a connectome circuit, and the paddle
+goes wherever 143 LC11 cells say the ball is — **93% of balls returned**
+against 16% for a parked paddle, holding flat across a session. A panel under
+the court shows all 143 cells live, with the fly's estimate against the
+ball's true height.
+
+The flags are load-bearing rather than decoration. `--reset-on-serve` clears
+the circuit between balls: without it the membrane state drifts beyond
+anything calibration covered and play collapses from ~90% to 8% over a
+session. `--pad-speed` frees the paddle from its 7 px/frame walk, worth ~10
+points. `--frame-ms 20` gives the frame a budget a ~28 ms glance fits inside.
+
+Calibration is cached in `output/`, keyed on the circuit *and* the conditions
+it was fitted under — paddle speed, ball speed, glance interval, reset policy
+— so changing any of them refits rather than silently reusing a decode from a
+different regime. That key exists because getting it wrong is the single most
+expensive mistake in this file's history.
 
 ## Next steps
 
-1. Map `get_ommatidia_readouts()` (2 x 721 x 2) onto retinotopic T4/T5 input.
-   The transduction function is an open modelling decision, not a given, and
-   without it direction selectivity cannot be tested at all.
-2. Map DNa02 firing onto a turning command in flygym
-3. Close the loop: visual motion in, compensatory turn out
+1. Give the neuron model a multiplicative operation. Everything that failed
+   here needs one: direction selectivity needs the delayed and undelayed arms
+   multiplied, interception needs velocity times time-of-flight, and reading
+   position out of a place code needs a quotient. `x ← x + (dt/tau)(−x + Wr +
+   b + u)` with a monotone nonlinearity is a leaky *sum*. This is one line of
+   the model and it is load-bearing for every negative result above.
+2. Model presynaptic plasticity. Dopamine acts on Kenyon cell *terminals* in
+   the animal, so it scales a KC's output to every MBON at once rather than a
+   per-(KC, MBON) gain — a different interference structure, and 223,045
+   synapses of DAN→KC that are not modelled at all.
+3. Make the decode the fly's own. `see-pong` proves the information is in the
+   connectome, but a kernel regression fitted offline is doing the reading.
+   `BrainNet` is differentiable and `LearningParams.readout_rate` gives a
+   reward-driven output map — either would move the extraction inside the
+   animal, which is the difference between "the wiring carries this" and "the
+   fly can use it".
 4. Compare against classical baselines (Bug algorithms, infotaxis) under
    degraded sensing — apparently nobody has done this

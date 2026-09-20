@@ -143,6 +143,12 @@ ACTION_NAMES = {
 }
 
 
+def action_names(n: int) -> tuple:
+    """Channel labels for any count. `--bins` makes the channels court
+    positions rather than moves, so they are numbered."""
+    return ACTION_NAMES.get(n) or tuple(f"b{i}" for i in range(n))
+
+
 def place_code(n: int, value: float, lo: int, hi: int, width: float,
                peak: float) -> np.ndarray:
     """A Gaussian bump over channels [lo, hi), centred by `value` in [-1, 1]."""
@@ -152,6 +158,250 @@ def place_code(n: int, value: float, lo: int, hi: int, width: float,
     idx = np.arange(span)
     out[lo:hi] = peak * np.exp(-0.5 * ((idx - centre) / width) ** 2)
     return out
+
+
+class Aimer:
+    """A fly that decides *where to stand*, once per ball.
+
+    Everything else in this file asks the fly for a move every frame -- up,
+    down or hold -- and reinforces whether that move closed a gap. The result
+    is a follower, and measurably so: the paddle sits 6.1 px from where the
+    ball is and 137.4 px from where it will arrive.
+
+    This asks a different question. The instant the ball starts coming back,
+    the fly sees its position, its velocity and how far it has to travel, and
+    picks **one** of `bins` places to stand. Then it goes there. No further
+    decisions, nothing to follow.
+
+    That turns interception into the shape of task this circuit is good at:
+    one stimulus, one choice among N, one outcome, immediately. It is the
+    structure `flybrain teach` solves at 100% for six odours and 68% for
+    thirty-two -- a classification, where the classes are court positions and
+    the label is where the ball actually lands.
+
+    Each output channel is a slice of the court, so `argmax` over the readout
+    is a place code for "stand here". The mushroom body is being used exactly
+    as it is in the animal -- sparse recoding, then a choice among behavioural
+    channels -- with the channels meaning positions instead of odour valences.
+    """
+
+    def __init__(self, a):
+        self.mb = MB.load_cache()
+        self.bins = int(a.bins)
+        self.brain = FlyBrain(self.mb, n_actions=self.bins,
+                              params=LearningParams(
+                                  learning_rate=a.learning_rate,
+                                  trace_tau=1.0))
+        self.n_pn = self.mb.n("PN")
+        self.rng = np.random.default_rng(a.seed)
+        self.speed = a.fly_speed
+        self.pn_gain = a.pn_gain
+        self.explore0, self.explore_final = a.explore, a.explore_final
+        self.halflife = a.explore_halflife
+        self.y = H / 2
+        self.target = H / 2
+        self.hits = self.misses = 0
+        self.last_pn = None
+        self.last_action = self.bins // 2
+        self.last_drives = np.zeros(self.bins, dtype=np.float32)
+        self.decisions = self.moved = self.toward = 0
+        self.n_actions = self.bins
+        lv = getattr(a, "levels", 0)
+        self.levels = (tuple(int(v) for v in lv)
+                       if isinstance(lv, (tuple, list)) else int(lv))
+        self.smooth = float(getattr(a, "smooth", 1.0))
+        # Reward any choice that would have caught the ball, rather than only
+        # the exact bin. With 5 bins of 76 px and a 96 px catch window an
+        # adjacent bin frequently still catches, and the exact-bin rule
+        # punishes it for doing so. It also gives most situations more than
+        # one acceptable answer, which is the one lever that relieves the
+        # association-capacity limit rather than trading against it.
+        self.tolerant = bool(getattr(a, "reward_catch", False))
+        # For diagnostics: which bins get used, and how far off each aim was.
+        self.aim_log = []
+        self.aim_err = []
+        self.moves = None
+
+    # -- the court, in bins -------------------------------------------------
+
+    def bin_of(self, y: float) -> int:
+        """Which slice of the court a height falls in."""
+        lo, hi = PAD_H / 2, H - PAD_H / 2
+        frac = (float(y) - lo) / max(hi - lo, 1e-9)
+        return int(np.clip(frac * self.bins, 0, self.bins - 1))
+
+    def bin_centre(self, index: int) -> float:
+        lo, hi = PAD_H / 2, H - PAD_H / 2
+        return lo + (index + 0.5) / self.bins * (hi - lo)
+
+    # -- sensing ------------------------------------------------------------
+
+    def _levels(self) -> tuple:
+        """Resolution per channel: height, vertical velocity, distance to go.
+
+        A single number for all three spends resolution where it does not
+        buy anything. The landing point is fold(y + vy * t) with t about 150
+        frames, so height enters with coefficient 1 and velocity enters
+        multiplied by the time of flight -- one step of vy displaces the
+        answer ~150x further than one step of y. Measured on the encoding
+        ceiling, (pos 4, vel 8, togo 6) reaches 61.9% from 72 addresses while
+        a uniform (4, 4, 4) reaches 49.8% from 32, and the reverse skew
+        (pos 48, vel 2, togo 2) collapses to 37.1%.
+        """
+        lv = self.levels
+        if isinstance(lv, (tuple, list)):
+            return tuple(int(v) for v in lv)
+        return (int(lv), int(lv), int(lv))
+
+    def _snap(self, v: float, levels: int | None = None) -> float:
+        """Quantise a [-1, 1] value to `levels` steps."""
+        n = int(levels if levels is not None else self._levels()[0])
+        if n <= 0:
+            return v
+        idx = int(np.clip((v + 1) / 2 * n, 0, n - 1))
+        return (idx + 0.5) / n * 2 - 1
+
+    def sense(self, ball_y: float, ball_vy: float, ball_x: float,
+              max_vy: float) -> np.ndarray:
+        """One snapshot: where the ball is, where it is going, how long it has.
+
+        Absolute positions, because where the ball ends up depends on where it
+        bounces off the walls and the walls are at fixed heights. There is no
+        tracking shortcut available here anyway -- by the time the answer is
+        known the decision has long been made.
+        """
+        n = self.n_pn
+        third = n // 3
+        span = (H - 2 * BALL) / 2
+        pos = np.clip((ball_y - H / 2) / span, -1.0, 1.0)
+        vel = np.clip(ball_vy / max(max_vy, 1e-6), -1.0, 1.0)
+        reach = max(W - 2 * MARGIN, 1.0)
+        togo = np.clip((ball_x - MARGIN) / reach * 2 - 1, -1.0, 1.0)
+
+        if self.levels:
+            # Coarsen the world before the mushroom body sees it.
+            #
+            # A Kenyon cell fires for a *conjunction* of projection neurons,
+            # so learning "this situation -> stand there" means having a cell
+            # tuned to each combination worth distinguishing. With 92 bins per
+            # channel and three channels that is ~778,000 combinations against
+            # 4,064 Kenyon cells, and almost nothing gets covered -- measured,
+            # chance. Quantising to `levels` per channel gives levels^3
+            # combinations, and at 4 levels (64 of them) the same circuit
+            # reaches 45.9% against a 21.8% baseline.
+            #
+            # This is the mushroom body used as what it is: a lookup table
+            # with a few thousand entries, not a function approximator.
+            lp, lv, lt = self._levels()
+            pos, vel, togo = (self._snap(v, n) for v, n in
+                              ((pos, lp), (vel, lv), (togo, lt)))
+        return (place_code(n, pos, 0, third, 5.0, self.pn_gain)
+                + place_code(n, vel, third, 2 * third, 5.0, self.pn_gain)
+                + place_code(n, togo, 2 * third, n, 5.0, self.pn_gain))
+
+    def explore_now(self) -> float:
+        if self.halflife <= 0:
+            return self.explore0
+        balls = self.hits + self.misses
+        frac = 1.0 / (1.0 + balls / self.halflife)
+        return self.explore_final + (self.explore0 - self.explore_final) * frac
+
+    # -- deciding and moving ------------------------------------------------
+
+    def aim(self, ball_y: float, ball_vy: float, ball_x: float,
+            max_vy: float) -> float:
+        """Commit to a place to stand. Called once, when the ball turns."""
+        pn = self.sense(ball_y, ball_vy, ball_x, max_vy)
+        self.brain.reset_trace()
+        action, drives = self.brain.choose(pn, explore=self.explore_now(),
+                                           rng=self.rng)
+        self.last_pn, self.last_action, self.last_drives = pn, action, drives
+        aimed = self.bin_centre(action)
+
+        # Re-deciding every frame makes the goal jitter between adjacent bins,
+        # and `approach` only walks at `fly_speed`, so the paddle chases a
+        # moving target and never arrives. Measured: the aim was just as good
+        # (32.5% of choices inside the catch window against 33.8% for
+        # deciding once) while the hit rate fell from 33.8% to 27.8% -- all of
+        # the loss was execution, none of it decision.
+        #
+        # A low-pass on the target keeps the benefit of re-deciding without
+        # the chase. `smooth` of 1.0 is the raw choice.
+        if self.smooth >= 1.0 or self.target is None:
+            self.target = aimed
+        else:
+            self.target += self.smooth * (aimed - self.target)
+        self.decisions += 1
+        return self.target
+
+    def approach(self) -> None:
+        """Walk toward the chosen spot. No decision is taken here."""
+        delta = self.target - self.y
+        step = float(np.clip(delta, -self.speed, self.speed))
+        self.y = float(np.clip(self.y + step, PAD_H / 2, H - PAD_H / 2))
+
+    def replay_aim(self, landed_at: float, flight) -> None:
+        """Teach every decision from the flight against the observed landing.
+
+        One ball, many labelled trials. Each remembered (pattern, choice) pair
+        is replayed as its own trial with the trace cleared between, which is
+        the regime this rule works in.
+        """
+        want = self.bin_of(landed_at)
+        catch = PAD_H / 2 + BALL
+        for pn, action in flight:
+            if self.tolerant and abs(self.bin_centre(action)
+                                     - landed_at) < catch:
+                self.brain.reset_trace()
+                self.brain.reinforce(pn, action, +1.0)
+                continue
+            self.brain.reset_trace()
+            self.brain.reinforce(pn, want, +1.0)
+            if action != want:
+                self.brain.reset_trace()
+                self.brain.reinforce(pn, action, -1.0)
+        self.brain.reset_trace()
+
+    def reinforce_aim(self, landed_at: float, *, learn: bool = True) -> None:
+        """Teach it where the ball went.
+
+        The landing point is *observed*, not computed -- the ball arrives
+        somewhere and that is a fact the animal can see. So the target the fly
+        should have chosen is available without anyone modelling the physics,
+        and the whole flight collapses to a single labelled trial.
+        """
+        if learn and self.last_pn is not None:
+            would_catch = (abs(self.bin_centre(self.last_action) - landed_at)
+                           < PAD_H / 2 + BALL)
+            if self.tolerant and would_catch:
+                # The choice it made would have caught the ball, so reinforce
+                # *that*, not whichever bin centre happens to be nearest. The
+                # exact-bin rule punishes a working choice for being
+                # approximate, which is teaching it to avoid success.
+                self.brain.reset_trace()
+                self.brain.reinforce(self.last_pn, self.last_action, +1.0)
+                self.brain.reset_trace()
+            else:
+                want = self.bin_of(landed_at)
+                self.brain.reset_trace()
+                # Reward the bin that was right. With a dozen or more
+                # channels, punishing whatever was chosen teaches almost
+                # nothing -- most guesses are wrong early and "not that one"
+                # barely narrows it.
+                self.brain.reinforce(self.last_pn, want, +1.0)
+                if self.last_action != want:
+                    self.brain.reset_trace()
+                    self.brain.reinforce(self.last_pn, self.last_action, -1.0)
+                self.brain.reset_trace()
+
+        if self.last_pn is not None:
+            self.aim_log.append(int(self.last_action))
+            self.aim_err.append(abs(self.bin_centre(self.last_action)
+                                    - landed_at))
+        if abs(landed_at - self.y) < PAD_H / 2 + BALL:
+            self.hits += 1
+        else:
+            self.misses += 1
 
 
 class Fly:
@@ -176,6 +426,12 @@ class Fly:
                                   trace_tau=a.trace_tau,
                                   trace_normalize=a.trace_normalize))
         self.random_policy = getattr(a, "random_policy", False)
+        # Hindsight uses the same four-channel absolute encoding as predict
+        # mode -- it has to, since the intercept depends on absolute wall
+        # positions -- but never sees a computed intercept. Same inputs, and
+        # the only difference is where the teaching signal comes from.
+        self.predict = getattr(a, "predict", False) or getattr(
+            a, "hindsight", False)
         self.n_pn = self.mb.n("PN")
         self.rng = np.random.default_rng(a.seed)
         self.explore = a.explore
@@ -193,6 +449,42 @@ class Fly:
         self.prev_ball_y = H / 2
         if a.load and Path(a.load).exists():
             print(checkpoint.load(a.load, self.brain))
+
+    def sense_predict(self, ball_y: float, prev_ball_y: float,
+                      ball_x: float) -> np.ndarray:
+        """Four channels: ball now, ball a frame ago, own paddle, and how far
+        the ball still has to travel.
+
+        The last one is what makes prediction possible at all. Without it
+        there is no time-to-arrival, so the intercept is not a function of the
+        inputs and no reward can teach the fly to aim at one -- it can only
+        learn to follow. Measured on the tracking version: 6.1 px from where
+        the ball is, 137.4 px from where it arrives.
+
+        Positions here are **absolute**, not offsets from the paddle, and that
+        is not a detail. Where the ball ends up depends on where it bounces
+        off the walls, and the walls are at fixed absolute heights -- so an
+        egocentric code cannot express the intercept however much ball-x is
+        added to it. Measured with the egocentric version: 40.0% against
+        53.8% for plain tracking, worse than not trying.
+
+        The cost is that the fly now has to learn the ball-minus-paddle
+        relation itself, which the tracking encoding hands over for free.
+        """
+        n = self.n_pn
+        quarter = n // 4
+        span = (H - 2 * BALL) / 2
+        now = np.clip((ball_y - H / 2) / span, -1.0, 1.0)
+        before = np.clip((prev_ball_y - H / 2) / span, -1.0, 1.0)
+        mine = np.clip((self.y - H / 2) / ((H - PAD_H) / 2), -1.0, 1.0)
+        reach = max(W - 2 * MARGIN, 1.0)
+        togo = np.clip((ball_x - MARGIN) / reach * 2 - 1, -1.0, 1.0)
+        return (place_code(n, now, 0, quarter, 5.0, self.pn_gain)
+                + place_code(n, before, quarter, 2 * quarter, 5.0,
+                             self.pn_gain)
+                + place_code(n, mine, 2 * quarter, 3 * quarter, 5.0,
+                             self.pn_gain)
+                + place_code(n, togo, 3 * quarter, n, 5.0, self.pn_gain))
 
     def sense(self, ball_y: float, prev_ball_y: float) -> np.ndarray:
         """Two frames of the ball, relative to the paddle, as PN activity.
@@ -234,8 +526,10 @@ class Fly:
         frac = 1.0 / (1.0 + balls / self.explore_halflife)
         return self.explore_final + (self.explore - self.explore_final) * frac
 
-    def step(self, ball_y: float) -> None:
-        pn = self.sense(ball_y, self.prev_ball_y)
+    def step(self, ball_y: float, ball_x: float | None = None) -> None:
+        pn = (self.sense_predict(ball_y, self.prev_ball_y, ball_x)
+              if self.predict and ball_x is not None
+              else self.sense(ball_y, self.prev_ball_y))
         self.prev_ball_y = ball_y
         # Tag the synapses active now, without changing them: the eligibility
         # trace is what lets reinforcement arrive later, when the ball finally
@@ -308,6 +602,12 @@ class Court:
         # Named, because an index got these backwards once: each side's
         # number was counting its own misses.
         self.points = {"human": 0, "fly": 0}
+        # Decisions taken during the current flight, awaiting the outcome.
+        self.flight = []
+        # Whether the fly has already chosen a spot for this incoming ball.
+        self.committed = False
+        # Decisions taken during the current inbound flight (bins mode).
+        self.aim_flight = []
         self.serve(+1)
 
     def serve(self, direction):
@@ -328,6 +628,95 @@ class Court:
     # Below it the ball would cross the court so slowly that a rally stops
     # being a rally.
     MAX_STEEPNESS = 0.85
+
+    def _advance_ball(self) -> None:
+        """Ball physics, shared by both control modes."""
+        self.bx += self.vx
+        self.by += self.vy
+        if self.by < BALL or self.by > H - BALL:
+            self.vy = -self.vy
+            self.by = float(np.clip(self.by, BALL, H - BALL))
+
+    def _resolve_aim(self, *, learn: bool = True) -> None:
+        """Contacts, for the one-decision-per-ball mode."""
+        fx = W - MARGIN
+        if self.vx > 0 and self.bx >= fx - BALL:
+            landed = float(self.by)
+            caught = abs(landed - self.fly.y) < PAD_H / 2 + BALL
+            if learn and self.aim_flight:
+                # Hindsight: the landing point is now a fact, so every
+                # decision taken during the flight can be graded against it.
+                # The last one is scored by `reinforce_aim` below, which also
+                # keeps the hit counters.
+                self.fly.replay_aim(landed, self.aim_flight[:-1])
+            self.aim_flight.clear()
+            self.fly.reinforce_aim(landed, learn=learn)
+            if caught:
+                self._rebound(self.fly.y, -1.0)
+            else:
+                self.points["human"] += 1
+                self.serve(+1)
+            self.committed = False
+
+        hx = MARGIN
+        if self.vx < 0 and self.bx <= hx + BALL:
+            if abs(self.by - self.human_y) < PAD_H / 2 + BALL:
+                self._rebound(self.human_y, +1.0)
+            else:
+                self.points["fly"] += 1
+                self.serve(-1)
+
+    def _replay(self, landed_at: float) -> None:
+        """Grade the whole flight now that the answer has arrived.
+
+        This is the difference between *computing* the intercept and
+        *observing* it. Everywhere else in this file the target comes from
+        `intercept()` -- a closed-form extrapolation done in Python, outside
+        the circuit, which is really my solution being distilled into the fly.
+        Here nothing is computed. The ball lands somewhere, that somewhere is
+        a fact the animal can see, and every decision taken during the flight
+        is graded against it after the fact.
+
+        It is also a much richer signal than the sparse reward that plateaued.
+        A hit-or-miss bit is one number shared across ~150 decisions; this is
+        a *target*, so every decision gets its own sign. Same eligibility
+        machinery, far more information per ball.
+
+        Each remembered frame is replayed as its own trial, with the trace
+        cleared between, because that is the regime this rule works in --
+        `flybrain teach` reaches 100% exactly this way.
+        """
+        for pn, action, y_before, y_after in self.flight:
+            closed = abs(y_before - landed_at) - abs(y_after - landed_at)
+            if closed == 0.0:
+                continue
+            self.fly.brain.reset_trace()
+            self.fly.brain.reinforce(pn, action, float(np.sign(closed)))
+        self.fly.brain.reset_trace()
+        self.flight.clear()
+
+    def intercept(self) -> float:
+        """Where the ball will reach the fly's paddle, with wall bounces.
+
+        Closed form: extrapolate to the paddle plane, then fold back into the
+        court with a triangle wave, which is what perfectly elastic walls do
+        to a straight line.
+
+        Only meaningful while the ball is inbound. When it is heading for the
+        human the fly has nothing to aim at, so the target falls back to the
+        ball itself and the reward is about staying with it.
+
+        In tracking mode this returns the ball's current y, so the reward is
+        unchanged and the two modes share one code path.
+        """
+        if not self.a.predict or self.a.hindsight or self.vx <= 0:
+            return float(self.by)
+        span = H - 2 * BALL
+        t = (W - MARGIN - BALL - self.bx) / max(self.vx, 1e-6)
+        y = (self.by + self.vy * t - BALL) % (2 * span)
+        if y > span:
+            y = 2 * span - y
+        return float(y + BALL)
 
     def _rebound(self, paddle_y: float, direction: float) -> None:
         """Send the ball back, with english, at a constant speed.
@@ -352,13 +741,61 @@ class Court:
         vx = direction * np.sqrt(max(speed ** 2 - vy ** 2, 1e-9))
         self.vx, self.vy = float(vx), float(vy)
 
-    def step(self, human_y: float, *, dense: bool = False) -> None:
-        """One frame: the fly decides, the ball moves, contacts are resolved."""
-        self.human_y = human_y
-        gap_before = abs(self.by - self.fly.y)
-        self.fly.step(self.by)
+    def step(self, human_y: float, *, dense: bool = False,
+             learn: bool = True) -> None:
+        """One frame: the fly decides, the ball moves, contacts are resolved.
 
-        if dense:
+        `learn=False` freezes the synapses. Evaluation needs it: the benchmark
+        used to keep applying sparse terminal reward while measuring, and
+        sparse reward does not merely fail to teach a drilled fly, it takes it
+        apart -- 100% at ball 40 down to 40% by ball 200. Every "after the
+        drill" number measured that way was a policy being destroyed as it was
+        read.
+        """
+        self.human_y = human_y
+
+        if self.a.bins:
+            # One decision per ball, taken the instant it turns toward the
+            # fly, then a walk to the chosen spot.
+            if self.vx > 0:
+                # Re-deciding every frame does two things. It refines the
+                # target as the ball approaches -- distance-to-travel shrinks,
+                # so the estimate gets easier -- and it turns one labelled
+                # trial per ball into ~136 of them, which is the difference
+                # between the 33.4% a single trial per ball reached and
+                # whatever this does.
+                #
+                # Worth being honest that it also erodes the claim: as the
+                # ball nears the paddle the intercept converges on the ball's
+                # current position, so a continuously re-aiming fly ends up
+                # doing something close to tracking by the end of the flight.
+                if self.a.reaim or not self.committed:
+                    self.fly.aim(self.by, self.vy, self.bx, self.a.ball_speed)
+                    if learn and self.fly.last_pn is not None:
+                        self.aim_flight.append((self.fly.last_pn,
+                                                self.fly.last_action))
+                self.committed = True
+            else:
+                self.committed = False
+            self.fly.approach()
+            self._advance_ball()
+            self._resolve_aim(learn=learn)
+            return
+
+        target = self.intercept()
+        gap_before = abs(target - self.fly.y)
+        y_before = self.fly.y
+        self.fly.step(self.by, self.bx)
+
+        if (learn and self.a.hindsight and self.vx > 0
+                and self.fly.last_pn is not None):
+            # Remember the decision. Nothing is taught yet -- at this point in
+            # the flight nobody knows where the ball is going, the fly least
+            # of all.
+            self.flight.append((self.fly.last_pn, self.fly.last_action,
+                                y_before, self.fly.y))
+
+        if learn and dense and not self.a.hindsight:
             # Every frame is its own trial: the move either closed the gap to
             # the ball or opened it, and that is the outcome, immediately.
             #
@@ -370,7 +807,16 @@ class Court:
             #
             # STAY does not move the paddle, so it earns nothing either way
             # rather than being scored as a failure.
-            outcome = float(np.sign(gap_before - abs(self.by - self.fly.y)))
+            outcome = float(np.sign(gap_before - abs(target - self.fly.y)))
+            # In predict mode, say nothing while the ball is heading away.
+            # There is no intercept to aim at then, so the target falls back
+            # to the ball itself and the fly would be taught to track for half
+            # of every rally and to anticipate for the other half. Measured
+            # with that contradiction in place: 31.7% against 76.7% for plain
+            # tracking. The ball machine in `train-pong-gpu` never hits this,
+            # because its ball is always inbound.
+            if self.a.predict and self.vx <= 0:
+                outcome = 0.0
             if outcome != 0.0 and self.fly.last_pn is not None:
                 self.fly.brain.reinforce(self.fly.last_pn,
                                          self.fly.last_action, outcome)
@@ -385,15 +831,17 @@ class Court:
         # Fly's side.
         fx = W - MARGIN
         if self.vx > 0 and self.bx >= fx - BALL:
+            if learn and self.a.hindsight:
+                self._replay(float(self.by))
             caught = abs(self.by - self.fly.y) < PAD_H / 2 + BALL
             # In dense mode the per-frame signal has already done the
             # teaching; a terminal bit on top would credit the whole rally to
             # its final frame. The hit still counts for the score either way.
             if caught:
                 self._rebound(self.fly.y, -1.0)
-                self.fly.reinforce(+1.0, learn=not dense)
+                self.fly.reinforce(+1.0, learn=learn and not dense)
             else:
-                self.fly.reinforce(-1.0, learn=not dense)
+                self.fly.reinforce(-1.0, learn=learn and not dense)
                 self.points["human"] += 1      # the fly missed: your point
                 self.serve(+1)
 
@@ -465,7 +913,8 @@ class BrainPanel:
         n_mbon = fly.brain.n_mbon
         groups = np.array_split(np.arange(n_mbon), fly.n_actions)
         self.mbon_colour = np.empty(n_mbon, dtype=object)
-        palette = ("#ff6b6b", "#9aa0b5", "#6bcB77")      # UP / HOLD / DOWN
+        # Cycled, since --bins gives as many channels as court slices.
+        palette = ("#ff6b6b", "#9aa0b5", "#6bcB77")
         for k, idx in enumerate(groups):
             self.mbon_colour[idx] = palette[k % len(palette)]
         self.mbon_bars = self._strip(c, 182, 50, n_mbon, "#9aa0b5")
@@ -481,9 +930,10 @@ class BrainPanel:
         for k in range(fly.n_actions):
             y = 256 + k * 22
             self.drive_bars.append(
-                c.create_rectangle(70, y, 70, y + 14, fill=palette[k],
+                c.create_rectangle(70, y, 70, y + 14,
+                                   fill=palette[k % len(palette)],
                                    width=0))
-            c.create_text(10, y + 7, text=ACTION_NAMES[fly.n_actions][k],
+            c.create_text(10, y + 7, text=action_names(fly.n_actions)[k],
                           anchor="w", fill="#9aa0b5", font=("monospace", 8))
             self.drive_text.append(
                 c.create_text(self.W - 10, y + 7, text="", anchor="e",
@@ -576,12 +1026,15 @@ class Game:
         import tkinter as tk
 
         self.a = a
-        self.fly = Fly(a)
+        self.fly = Aimer(a) if a.bins else Fly(a)
         if a.drill:
-            rate = dense_drill(a, self.fly, a.drill)
+            # The aimer trains on synthetic serves with no flight to
+            # simulate, which is both faster and the right shape of trial.
+            rate = (aim_drill(a, self.fly, a.drill) if a.bins
+                    else dense_drill(a, self.fly, a.drill))
+            baseline = "21.8%" if a.bins else "22.5%"
             print(f"drill finished at {100*rate:.1f}% "
-                  f"(random policy scores 22.5% in this encoding)",
-                  flush=True)
+                  f"(random scores {baseline} here)", flush=True)
         if a.pretrain:
             print(f"warming up on {a.pretrain} single decisions ...",
                   flush=True)
@@ -679,7 +1132,7 @@ class Game:
         b = self.fly.brain
         seen = self.fly.hits + self.fly.misses
         rate = 100.0 * self.fly.hits / seen if seen else 0.0
-        names = ACTION_NAMES[self.fly.n_actions]
+        names = action_names(self.fly.n_actions)
         drives = " ".join(f"{d:+.4f}" for d in self.fly.last_drives)
         # Every field is fixed-width. A Label sizes itself to its text and the
         # toplevel sizes itself to the Label, so a status line that grows from
@@ -693,7 +1146,7 @@ class Game:
                   f"[{drives}]   "
                   f"trials {b.state.trials:6d}   "
                   f"depressed {100*b.depressed_fraction():5.1f}%   "
-                  f"explore {self.fly.explore:5.3f}      "
+                  f"explore {self.fly.explore_now():5.3f}      "
                   f"[s] save  [r] reset  [q] quit"))
 
 
@@ -765,6 +1218,84 @@ def policy_report(fly, rng, trials: int = 2000) -> dict:
     }
 
 
+def landing_of(ball_y: float, vy: float, vx: float, ball_x: float) -> float:
+    """Where a ball launched from here will reach the fly's paddle.
+
+    Closed form: extrapolate to the paddle plane, then fold back into the
+    court with a triangle wave, which is what perfectly elastic walls do to a
+    straight line. Used only to *generate* training balls quickly -- in the
+    game the landing point is observed, not computed.
+    """
+    span = H - 2 * BALL
+    t = (W - MARGIN - BALL - ball_x) / max(vx, 1e-6)
+    y = (ball_y + vy * t - BALL) % (2 * span)
+    if y > span:
+        y = 2 * span - y
+    return float(y + BALL)
+
+
+def aim_drill(a, fly, balls: int, *, quiet: bool = False) -> float:
+    """Teach the aimer on synthetic serves, without simulating the flight.
+
+    The flight is ~136 frames of physics that produce exactly one learning
+    trial, so running it is pure overhead for training. Sampling ball states
+    directly gives the same trials thousands of times faster, and the task is
+    then literally `flybrain teach`: one stimulus, one choice among N, one
+    outcome, immediately -- the regime this circuit solves at 100%.
+
+    It is harder than `teach` in one way that matters. There the stimuli are
+    six fixed odours; here the input is continuous in three dimensions, so the
+    fly is learning a *mapping* rather than memorising a handful of patterns.
+    That needs far more trials.
+    """
+    rng = np.random.default_rng(a.seed + 11)
+    block = max(1, balls // 10)
+    right = 0
+    log = []
+    if not quiet:
+        print(f"drilling {balls} synthetic serves, one decision each "
+              f"({fly.bins} bins, {fly.levels or 'continuous'} input levels)")
+        print(f"{'serves':>7s} {'in window':>10s} {'median err':>11s} "
+              f"{'explore':>8s}")
+
+    for i in range(1, balls + 1):
+        ball_y = float(rng.uniform(BALL, H - BALL))
+        angle = float(rng.uniform(-0.5, 0.5)) * 1.6
+        angle = float(np.clip(angle, -np.arcsin(Court.MAX_STEEPNESS),
+                              np.arcsin(Court.MAX_STEEPNESS)))
+        vx = a.ball_speed * float(np.cos(angle))
+        vy = a.ball_speed * float(np.sin(angle))
+        # Where along the flight the fly is asked has to match how it will
+        # be used. Committing once means deciding the moment the ball turns,
+        # so the left half is the whole world. `--reaim` asks again on every
+        # frame, and then the ball is seen right across the court -- training
+        # only on the left half leaves every late-flight decision out of
+        # distribution, which is part of why re-aiming measured worse than
+        # committing once rather than better.
+        x_max = (W - MARGIN - BALL) if getattr(a, "reaim", False) else W / 2
+        ball_x = float(rng.uniform(MARGIN, x_max))
+        landed = landing_of(ball_y, vy, vx, ball_x)
+
+        fly.y = fly.bin_centre(fly.bin_of(rng.uniform(PAD_H / 2,
+                                                     H - PAD_H / 2)))
+        fly.aim(ball_y, vy, ball_x, a.ball_speed)
+        err = abs(fly.bin_centre(fly.last_action) - landed)
+        log.append(err)
+        right += int(err < PAD_H / 2 + BALL)
+        fly.reinforce_aim(landed)
+
+        if not quiet and i % block == 0:
+            recent = np.array(log[-block:])
+            print(f"{i:7d} {100*(recent < PAD_H/2 + BALL).mean():9.1f}% "
+                  f"{np.median(recent):10.1f} px {fly.explore_now():8.3f}")
+
+    fly.hits = fly.misses = 0
+    fly.aim_log.clear()
+    fly.aim_err.clear()
+    fly.y = H / 2
+    return right / max(balls, 1)
+
+
 def dense_drill(a, fly, balls: int, *, quiet: bool = False) -> float:
     """Train against a ball machine with per-frame reinforcement.
 
@@ -827,27 +1358,43 @@ def benchmark(a) -> int:
     is the fly's hit rate on balls that reach it, which this maximises the
     rate of collecting.
     """
-    fly = Fly(a)
+    fly = Aimer(a) if a.bins else Fly(a)
     rng = np.random.default_rng(a.seed)
     court = Court(a, fly, rng)
 
     label = "random policy" if a.random_policy else f"explore {a.explore}"
     if not a.random_policy and a.explore_halflife > 0:
         label += f" -> {a.explore_final} (halflife {a.explore_halflife} balls)"
-    if a.explore_absolute:
-        label += ", absolute"
-    print(f"{a.actions} actions ({'/'.join(ACTION_NAMES[a.actions])}), "
-          f"{label}, seed {a.seed}")
 
-    before = policy_report(fly, np.random.default_rng(a.seed + 99))
-    print(f"policy before: {100*before['agreement']:.1f}% agreement with "
-          f"tracking (chance {100*before['chance']:.1f}%)")
+    if a.bins:
+        # A place code over the court, not a set of moves, so the
+        # tracking-agreement probe does not apply -- there is nothing to track.
+        print(f"{a.bins} bins of {(H - PAD_H) / a.bins:.0f} px, one decision "
+              f"per ball, {label}, seed {a.seed}")
+        bin_px = (H - PAD_H) / a.bins
+        window = PAD_H + 2 * BALL
+        wider = "wider than" if bin_px > window else "narrower than"
+        print(f"a bin is {bin_px:.0f} px, {wider} the paddle's "
+              f"{window:.0f} px catch window")
+    else:
+        if a.explore_absolute:
+            label += ", absolute"
+        print(f"{a.actions} actions ({'/'.join(ACTION_NAMES[a.actions])}), "
+              f"{label}, seed {a.seed}")
+        before = policy_report(fly, np.random.default_rng(a.seed + 99))
+        print(f"policy before: {100*before['agreement']:.1f}% agreement with "
+              f"tracking (chance {100*before['chance']:.1f}%)")
 
     if a.drill:
-        rate = dense_drill(a, fly, a.drill)
-        mid = policy_report(fly, np.random.default_rng(a.seed + 99))
-        print(f"after {a.drill} drilled balls: {100*rate:.1f}% during the "
-              f"drill, policy now {100*mid['agreement']:.1f}%")
+        if a.bins:
+            rate = aim_drill(a, fly, a.drill)
+            print(f"\nafter {a.drill} drilled serves: "
+                  f"{100*rate:.1f}% landed in the catch window\n")
+        else:
+            rate = dense_drill(a, fly, a.drill)
+            mid = policy_report(fly, np.random.default_rng(a.seed + 99))
+            print(f"after {a.drill} drilled balls: {100*rate:.1f}% during the "
+                  f"drill, policy now {100*mid['agreement']:.1f}%")
 
     if a.pretrain:
         pretrain(fly, a.pretrain, np.random.default_rng(a.seed + 7))
@@ -866,7 +1413,11 @@ def benchmark(a) -> int:
     while seen < a.benchmark and frames < max_frames:
         # A returner that tracks the ball perfectly, so rallies never end on
         # its side and the fly keeps getting served to.
-        court.step(float(np.clip(court.by, PAD_H / 2, H - PAD_H / 2)))
+        # After a drill, freeze. Otherwise the benchmark's own sparse terminal
+        # reward unpicks what the drill built while the number is being read,
+        # and the result describes the destruction rather than the policy.
+        court.step(float(np.clip(court.by, PAD_H / 2, H - PAD_H / 2)),
+                   learn=not a.drill)
         frames += 1
         seen = fly.hits + fly.misses
         if seen >= last_seen + block:
@@ -881,6 +1432,23 @@ def benchmark(a) -> int:
     print(f"\n{fly.hits} / {seen} balls = {100*fly.hits/seen:.1f}% "
           f"(95% CI {100*lo:.1f}-{100*hi:.1f}%)")
     print(f"{frames} frames, {frames/max(seen,1):.0f} decisions per ball")
+
+    if a.bins:
+        # For a place-code readout the question is different: how close does
+        # the chosen bin land to where the ball actually did?
+        print(f"\naiming accuracy over the last balls")
+        print(f"  bins used: {len(set(fly.aim_log))} of {a.bins}")
+        if fly.aim_err:
+            err = np.array(fly.aim_err)
+            print(f"  median |chosen - actual| {np.median(err):5.1f} px  "
+                  f"(catch window {PAD_H / 2 + BALL:.0f} px, "
+                  f"court {H - PAD_H:.0f} px)")
+            print(f"  within the window        "
+                  f"{100 * (err < PAD_H / 2 + BALL).mean():5.1f}%")
+        print(f"  final exploration        {fly.explore_now():.3f}")
+        if a.save:
+            print(f"saved -> {checkpoint.save(a.save, fly.brain, task='pong-aim', notes=f'{fly.hits}/{seen}')}")
+        return 0
 
     # The question this run exists to answer.
     after = policy_report(fly, np.random.default_rng(a.seed + 99))
@@ -952,6 +1520,50 @@ if __name__ == "__main__":
     ap.add_argument("--explore-absolute", action="store_true",
                     help="fixed-magnitude noise instead of noise scaled to the "
                          "drive spread, which pins signal-to-noise forever")
+    ap.add_argument("--smooth", type=float, default=1.0,
+                    help="low-pass on the target when re-aiming; 1.0 is raw, "
+                         "0.2 keeps the paddle from chasing a jittering goal")
+    ap.add_argument("--reaim", action="store_true",
+                    help="re-decide the target every frame instead of once "
+                         "per ball, and learn from every decision in the "
+                         "flight once the landing point is known")
+    ap.add_argument("--levels", type=int, default=0, metavar="K",
+                    help="quantise each input channel to K steps before the "
+                         "mushroom body sees it. K^3 combinations must fit in "
+                         "~4000 Kenyon cells; 4 works, continuous does not")
+    ap.add_argument("--bins", type=int, default=0, metavar="N",
+                    help="one decision per ball: the fly sees the ball turn, "
+                         "picks one of N places to stand, and goes there. "
+                         "Try 12")
+    ap.add_argument("--levels-pos", type=int, default=0, metavar="K",
+                    help="resolution for ball height alone; 0 uses --levels")
+    ap.add_argument("--levels-vel", type=int, default=0, metavar="K",
+                    help="resolution for vertical velocity alone. Buys no "
+                         "update rate under --reaim: velocity sits still "
+                         "between wall bounces, so finer steps only add "
+                         "states the flight never visits")
+    ap.add_argument("--levels-togo", type=int, default=0, metavar="K",
+                    help="resolution for distance still to travel. The only "
+                         "channel that moves through a flight, so it alone "
+                         "sets how often --reaim can change its mind: 4 "
+                         "gives 2.4 decisions/sec, 12 gives 5.7")
+    ap.add_argument("--reward-catch", action="store_true",
+                    help="with --bins: reward any aim that would have caught "
+                         "the ball, not only the exact bin. An adjacent bin "
+                         "often still catches, and the exact-bin rule "
+                         "punishes it for doing so. Measured: no significant "
+                         "effect either way at 5 bins, where only 1.2 bins "
+                         "catch a typical ball")
+    ap.add_argument("--hindsight", action="store_true",
+                    help="learn from where the ball actually landed, graded "
+                         "after the fact. No intercept is computed -- the "
+                         "target is observed, so the prediction is the "
+                         "circuit's rather than the experimenter's")
+    ap.add_argument("--predict", action="store_true",
+                    help="aim at where the ball will arrive instead of where "
+                         "it is: adds a ball-x channel and rewards progress "
+                         "toward the computed intercept. Pair with a low "
+                         "--fly-speed so tracking cannot keep up")
     ap.add_argument("--no-brain", dest="brain", action="store_false",
                     help="hide the live circuit panel beside the court")
     ap.add_argument("--drill", type=int, default=0, metavar="BALLS",
@@ -971,4 +1583,10 @@ if __name__ == "__main__":
     args = ap.parse_args()
     if args.explore_final is None:
         args.explore_final = args.explore
+    # Aimer takes either one number or a (height, velocity, distance) triple.
+    # The CLI offers both; fold the second into the first here so nothing
+    # downstream has to know which was given.
+    _per = (args.levels_pos, args.levels_vel, args.levels_togo)
+    if any(_per):
+        args.levels = tuple(v or args.levels for v in _per)
     sys.exit(main(args) or 0)

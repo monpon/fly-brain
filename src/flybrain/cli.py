@@ -27,6 +27,12 @@ APPS = {
                        "one stimulus, one choice, one outcome"),
     "shape": ("shape", "teach interception by curriculum, the way an "
                        "animal is actually trained"),
+    "see-pong": ("see_pong_game", "pong against a fly that looks at the "
+                                  "ball: no mushroom body, no coordinates"),
+    "intercept": ("intercept", "learn where the ball will arrive, from "
+                               "any point in its flight"),
+    "train-aim-gpu": ("train_aim_gpu", "the aiming task, hundreds of "
+                                       "flies at once on the GPU"),
     "train-pong-gpu": ("train_pong_gpu", "the same drill, hundreds of "
                                         "flies at once on the GPU"),
     "train-pong": ("train_pong", "drill a fresh fly on intercepting, "

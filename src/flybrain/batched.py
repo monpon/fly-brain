@@ -94,6 +94,13 @@ class BatchedBrain:
         self.dan_valence = t(mb.dan_valence)
         self.lateral_w = (t(ref.w_mbon_mbon)
                           if ref.w_mbon_mbon is not None else None)
+        self.mbon_dan_w = (t(ref.w_mbon_dan)
+                           if ref.w_mbon_dan is not None else None)
+        # Borrowed from the reference fly so both backends divide the feedback
+        # by the same measured MBON scale, and `mbon_dan=1` means the same
+        # thing in each.
+        self.mbon_ref = (ref._mbon_scale() if self.params.mbon_dan > 0.0
+                         else 1.0)
 
         N = self.n_flies
         self.gain = torch.ones(N, self.n_syn, device=d)
@@ -143,6 +150,9 @@ class BatchedBrain:
         self.trace = (self.trace * decay + kc * (1.0 - decay)
                       if p.trace_normalize else self.trace * decay + kc)
         mbon = self.mbon_rates(kc)
+        # Kept so `reinforce` can feed the circuit's own prediction back onto
+        # the DANs without recomputing the forward pass.
+        self.last_mbon = mbon
         if p.readout_rate > 0.0:
             r_decay = float(np.exp(-1.0 / max(p.readout_trace_tau
                                               or p.trace_tau, 1e-6)))
@@ -179,6 +189,17 @@ class BatchedBrain:
         pos, neg = self.dan_valence > 0, self.dan_valence < 0
         act[:, pos] = reward.unsqueeze(1)
         act[:, neg] = punishment.unsqueeze(1)
+
+        if self.params.mbon_dan > 0.0 and self.mbon_dan_w is not None:
+            # The outcome becomes an error: what the circuit already predicts
+            # is fed back onto the neurons that teach it. Most MBONs are
+            # inhibitory, so a well-learned stimulus cancels its own dopamine
+            # and learning stops rather than spending the plastic budget
+            # rewriting a memory that is already there.
+            mbon = getattr(self, "last_mbon", None)
+            if mbon is not None:
+                act = act + (self.params.mbon_dan / self.mbon_ref) * (
+                    mbon @ self.mbon_dan_w)
         return torch.clamp(act, min=0.0) @ self.w_dan_mbon
 
     def reinforce(self, actions, outcomes, active):
