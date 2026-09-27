@@ -511,7 +511,5 @@ expensive mistake in this file's history.
 
 ![Four-panel comic: a fly at a ping-pong table asks whether life is just a simulation and whether its every choice, thought and action was predetermined and never its own; the fly opposite tells it to shut up and serve.](docs/img/fly_comic.jpg)
 
-The fly on the left is right, at least here: its every choice *is*
-predetermined, by 10,827 neurons of connectome, a kernel regression and a
-random seed. It still only returns 93% of them.
+Credit: Valerie Shu
 
